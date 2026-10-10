@@ -2,7 +2,41 @@
 
 适用于 Ubuntu 22.04 和 Python 3.10+。仅使用 Python 标准库，无需 pip、Node.js 或联网下载依赖。
 
-## 启动
+## 独立桌面 GUI（服务器 / ETX）
+
+GUI 直接显示在服务器桌面或 ETX 远程桌面中，读取服务器上的文件，无需浏览器、HTTP 服务或 SSH 隧道。
+运行时不监听任何端口，也不需要网络连接。
+
+Ubuntu 22.04 如未安装 Tkinter，先安装一次：
+
+```bash
+sudo apt install python3-tk
+```
+
+如果公司服务器不能联网，可以由管理员通过内部软件源或离线包安装；已有 Tkinter 时不需要安装或下载。
+
+在 **ETX 桌面中的终端**启动：
+
+```bash
+cd perf-log-viewer
+python3 perf_viewer_gui.py
+```
+
+启动后点击“打开日志文件”，左侧选模块，右侧输入关键字；所有查看操作都在窗口中完成。
+也可以直接加载服务器日志：
+
+```bash
+python3 perf_viewer_gui.py /path/to/perf.log
+```
+
+支持模块名称搜索、组合关键字和短语搜索、层级路径、行号范围、分页、双击查看原始行，以及导出全部匹配结果。
+日志读取、查询和导出在后台执行。零值和每轮重复条目保留，导出会拒绝覆盖当前原日志。
+
+GUI 需要同时复制 **`perf_viewer_gui.py` 和 `perf_viewer.py`**，放在同一目录。
+原来的单文件浏览器版本仍可单独使用 `perf_viewer.py`。
+如果出现 `no display name` 或 `couldn't connect to display`，请从 ETX 图形会话的终端启动，不要手动指定不属于该会话的 DISPLAY。
+
+## 浏览器版启动
 
 ```bash
 cd perf-log-viewer

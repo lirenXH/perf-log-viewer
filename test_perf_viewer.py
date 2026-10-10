@@ -1,13 +1,15 @@
 import io
 import csv
 import json
+import os
+import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from perf_viewer import Handler, LogStore, UNLABELLED, parse_counter
+from perf_viewer import Handler, LogStore, UNLABELLED, export_to_file, parse_counter
 
 
 class ParserTests(unittest.TestCase):
@@ -99,6 +101,41 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(len(response.read().decode().splitlines()), 2)
         with urlopen(self.base + "/") as response:
             self.assertIn("打开日志文件", response.read().decode())
+
+
+class DesktopExportTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        from pathlib import Path
+        self.directory_path = Path(self.directory.name)
+        self.source = self.directory_path / "source.log"
+        self.source.write_text("[PERF] [SMS] Useful prefetch, 0\n[PERF] [SMS] Useful prefetch, 42\n[PERF] [ROB] commitInstr, 10\n")
+        self.store = LogStore()
+        self.addCleanup(self.store.close)
+        with self.source.open("rb") as stream:
+            self.store.load(stream, self.source.stat().st_size, self.source.name)
+
+    def test_export_all_matches_preserving_zero_and_duplicates(self):
+        destination = self.directory_path / "out.csv"
+        count = export_to_file(self.store, {"module": ["SMS"], "limit": ["1"]}, destination, "csv", self.source)
+        with destination.open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.reader(stream))
+        self.assertEqual(count, 2)
+        self.assertEqual([row[4] for row in rows[1:]], ["0", "42"])
+        log = self.directory_path / "out.log"
+        self.assertEqual(export_to_file(self.store, {"q": ["useful 42"]}, log, "log", self.source), 1)
+        self.assertEqual(log.read_text(), "[PERF] [SMS] Useful prefetch, 42\n")
+
+    def test_export_cannot_overwrite_source_or_hardlink(self):
+        original = self.source.read_bytes()
+        with self.assertRaises(ValueError):
+            export_to_file(self.store, {}, self.source, "log", self.source)
+        hardlink = self.directory_path / "alias.log"
+        os.link(self.source, hardlink)
+        with self.assertRaises(ValueError):
+            export_to_file(self.store, {}, hardlink, "log", self.source)
+        self.assertEqual(self.source.read_bytes(), original)
 
 
 if __name__ == "__main__":

@@ -166,11 +166,46 @@ class LogStore:
             return {"rows": [dict(zip(("line", "module", "path", "metric", "value", "raw"), row)) for row in rows],
                     "total": total, "page": page, "pages": pages, "serial": self.serial}
 
+    def iter_rows(self, params):
+        """Stream all matching rows, without the display's pagination limit."""
+        where, values = self.filters(params)
+        with self.lock:
+            if self.connection is None:
+                raise ValueError("请先加载日志")
+            rows = self.connection.execute(
+                "SELECT line, module, path, metric, value, raw FROM counters" + where + " ORDER BY line", values)
+            yield from rows
+
     def close(self):
         with self.lock:
             if self.connection:
                 self.connection.close()
             self.directory.cleanup()
+
+
+def export_to_file(store, params, destination, kind, source=None):
+    """Export every match; refuse to overwrite the source, including hard links."""
+    if kind not in ("csv", "log"):
+        raise ValueError("不支持的导出格式")
+    target = Path(destination)
+    if source is not None:
+        source = Path(source)
+        if target.resolve() == source.resolve() or (target.exists() and source.exists() and target.samefile(source)):
+            raise ValueError("导出路径不能是当前打开的原始日志，请选择其他文件名")
+    store.filters(params)
+    count = 0
+    with target.open("w", encoding="utf-8-sig" if kind == "csv" else "utf-8", newline="") as output:
+        if kind == "csv":
+            writer = csv.writer(output)
+            writer.writerow(["原始行号", "模块", "层级路径", "计数器名称", "数值", "原文"])
+            for row in store.iter_rows(params):
+                writer.writerow(row)
+                count += 1
+        else:
+            for row in store.iter_rows(params):
+                output.write(row[5] + "\n")
+                count += 1
+    return count
 
 
 HTML = r'''<!doctype html>
