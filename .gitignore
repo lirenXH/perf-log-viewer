@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.sqlite
+*.sqlite3
+*.csv
+*.log
+!sample.log

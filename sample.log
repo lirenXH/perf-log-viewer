@@ -1,0 +1,11 @@
+Booting Linux...
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.l2PfMonitor: [L2 SMS Prefetcher Monitor] Prefetch request accepted,                    0
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.l2PfMonitor: [L2 SMS Prefetcher Monitor] Prefetch allocated RQ,                    0
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.l2PfMonitor: [L2 SMS Prefetcher Monitor] Useful prefetch,                    0
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.monitor: [L2 Demand Monitor] Dcache access,               679299
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.monitor: [L2 Demand Monitor] Dcache hit,                    4115
+[PERF] TOP.SapphireCore.core.rob: [ROB Monitor] commitInstr,               20000000
+Warmup finished. The performance counters will be dumped and then reset.
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.l2PfMonitor: [L2 SMS Prefetcher Monitor] Prefetch request accepted,                    42
+[PERF] TOP.SapphireCore.core.l2CacheWrapper.l2Cache.monitor: [L2 Demand Monitor] Dcache access,               123456
+[PERF ][time=123456] 9527: clock_cycle, 98765
