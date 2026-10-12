@@ -22,7 +22,7 @@ cd perf-log-viewer
 python3 perf_viewer_gui.py
 ```
 
-启动后点击“打开日志文件”，左侧选模块，右侧输入关键字；所有查看操作都在窗口中完成。
+启动后点击“打开当前日志”，左侧选模块，右侧输入关键字；所有查看操作都在窗口中完成。
 也可以直接加载服务器日志：
 
 ```bash
@@ -32,9 +32,65 @@ python3 perf_viewer_gui.py /path/to/perf.log
 支持模块名称搜索、组合关键字和短语搜索、层级路径、行号范围、分页、双击查看原始行，以及导出全部匹配结果。
 日志读取、查询和导出在后台执行。零值和每轮重复条目保留，导出会拒绝覆盖当前原日志。
 
-GUI 需要同时复制 **`perf_viewer_gui.py`、`perf_viewer.py` 和 `perf_compare.py`**，放在同一目录。
+GUI 需要同时复制 **`perf_viewer_gui.py`、`perf_viewer.py`、`perf_compare.py` 和 `perf_runs.py`**，放在同一目录。
 原来的单文件浏览器版本仍可单独使用 `perf_viewer.py`。
 如果出现 `no display name` 或 `couldn't connect to display`，请从 ETX 图形会话的终端启动，不要手动指定不属于该会话的 DISPLAY。
+
+### SPEC 运行结果文件夹
+
+单文件模式和文件夹模式同时保留。单文件模式可直接打开 `.perf`、`.log` 等文件，也可打开两份文件进行计数器对比。
+文件夹模式适用于以下结构：
+
+```text
+运行结果根目录/
+├── perlbench_diffmail/
+│   ├── 180/
+│   │   ├── 180_20261011_035534_499423.perf
+│   │   ├── _180_0.010044.log
+│   │   └── _180_0.010044_gzip_check.log
+│   └── 10015/
+│       ├── 10015_20261011_062011_2281844.perf
+│       └── _10015_0.153974.log
+└── gcc_g23/
+    └── 1240/
+        ├── 1240_20261011_062011.perf
+        └── _1240_0.057653.log
+```
+
+1. 在“当前运行目录”粘贴路径并点击“加载目录”，或点击“选择目录”。选择的是包含各个子项的根目录。
+2. 在“SPEC 子项”和“checkpoint”下拉框中选择结果。checkpoint 按数字大小排序。
+3. 下方计数器表读取 `.perf`；上方指标表读取主 `.log` 中的 IPC、cycle、instrcount，也显示识别出的 Guest cycle spent 和 Host time spent。
+4. 在“基准运行目录”加载另一份运行结果。工具按 **子项名 + checkpoint 目录名** 精确配对，不依赖 `.perf` 文件名中的时间戳或主日志文件名中的权重。
+5. 指标表和计数器表均显示当前值、基准值、差值及变化百分比。两边所有 checkpoint 均可选择；只存在于一边的项保留为新增/缺失，缺少 `.perf` 或主 `.log` 会显示提示，不会自动当作数值零。
+6. “移除基准”返回当前文件夹浏览；“打开当前日志/基准日志”切回单文件模式，模块搜索、关键字、分页及计数器 CSV 导出仍可使用。
+
+同一个 checkpoint 有多份 `.perf` 或主 `.log` 时，文件下拉框允许明确选择；默认选文件名排序最后的 `.perf` 和排序最前的主 `.log`，并提示确认。
+默认选择仅按文件名排序，不推断两份文件是否属于同一次运行。`*_gzip_check.log` 被排除，`.txt` 等辅助文件不会参与分析。
+扫描阶段只建立目录/文件列表，选择 checkpoint 后才在后台解析对应的日志。
+
+支持截图中的 XiangShan 汇总格式：
+
+```text
+Core 0: EXCEEDING CYCLE/INSTR LIMIT at pc = 0x453b8
+total guest instructions = 40,000,001
+instrCnt = 40,000,001, cycleCnt = 15,881,339, IPC = 2.518679
+Seed=0 Guest cycle spent: 15,881,341
+Host time spent: 12,670,505ms
+```
+
+也支持 `instrcount`、`instr_count`、`cycle`、`cycle_count` 等常见写法，以及 ANSI 颜色、千分位、小数和科学计数法。
+主日志指标取每个 core 的最后一次对应输出，不累加多次汇总；多 core 分开显示。双击指标可查看两边的来源文件、行号和原文。
+如果没有显式 IPC，但有有效的 instrcount 和正数 cycle，会显示两者相除的 IPC，并在来源中标明是计算值。无法识别的指标显示“未识别”。
+`cycleCnt` 与 `Guest cycle spent` 分别显示；主日志里的 IPC 可能包含预热，不会自动改成 `.perf` 清零后的统计区间。
+计数器导出会保护两边选中的 `.perf` 和主 `.log`，避免覆盖源文件；CSV 导出范围为当前所选 checkpoint 的计数器。
+
+启动时也可以直接传入文件夹：
+
+```bash
+python3 perf_viewer_gui.py /path/to/spec-result
+```
+
+仓库中的 `sample_runs/current` 与 `sample_runs/baseline` 是合成示例，可以演示配对及两边缺少 checkpoint 的情况。
 
 ### 基准日志对比
 
@@ -133,3 +189,11 @@ ssh -N -L 8765:127.0.0.1:8765 user@server
 ```bash
 python3 -m unittest -v
 ```
+
+在可用的桌面会话中启用实际 Tk GUI 集成测试：
+
+```bash
+PERF_VIEWER_GUI_TEST=1 python3 -m unittest -v
+```
+
+GUI 测试会验证目录切换、同名配对、缺失项、多文件选择、单文件兼容及源日志保护，并禁止 GUI 使用网络 socket。

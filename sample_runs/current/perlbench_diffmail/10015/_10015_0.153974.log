@@ -1,0 +1,6 @@
+Synthetic example; this is not a real SPEC measurement.
+Core 0: EXCEEDING CYCLE/INSTR LIMIT at pc = 0x453b8
+total guest instructions = 40,000,001
+instrCnt = 40,000,001, cycleCnt = 15,881,339, IPC = 2.518679
+Seed=0 Guest cycle spent: 15,881,341
+Host time spent: 12,670,505ms

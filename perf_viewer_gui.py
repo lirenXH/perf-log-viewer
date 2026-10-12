@@ -17,13 +17,14 @@ except ImportError:
 
 from perf_viewer import ANSI, LogStore, export_to_file
 from perf_compare import ComparisonStore, export_comparison
+from perf_runs import RunDirectory, paired_keys, load_checkpoint
 
 
 class PerfViewerApp:
     def __init__(self, root):
         self.root = root
         root.title("性能计数器日志查看器")
-        root.geometry("1400x850")
+        root.geometry("1500x1000")
         root.minsize(850, 550)
         self.store = LogStore()
         self.baseline = LogStore()
@@ -36,6 +37,18 @@ class PerfViewerApp:
         self.source = None
         self.baseline_info = {"loaded": False}
         self.baseline_source = None
+        self.current_run = None
+        self.baseline_run = None
+        self.run_mode = False
+        self.current_directory = tk.StringVar()
+        self.baseline_directory = tk.StringVar()
+        self.benchmark = tk.StringVar()
+        self.checkpoint = tk.StringVar()
+        self.checkpoint_presence = tk.StringVar()
+        self.run_files = {name: tk.StringVar() for name in ("current_perf", "current_log", "baseline_perf", "baseline_log")}
+        self.run_file_choices = {}
+        self.summary_items = {}
+        self.pending_views = []
         self.module = ""
         self.page = 1
         self.pages = 1
@@ -67,7 +80,7 @@ class PerfViewerApp:
         self.compare_mode.trace_add("write", lambda *_: self.rebuild_comparison())
         root.bind("<Control-o>", lambda _: self.choose_file())
         root.protocol("WM_DELETE_WINDOW", self.close)
-        root.after(50, self.poll)
+        self.poll_timer = root.after(50, self.poll)
         self.render_modules()
 
     def _build(self):
@@ -77,7 +90,7 @@ class PerfViewerApp:
         style.configure("Treeview", rowheight=28)
         style.configure("Treeview.Heading", padding=(5, 6))
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(3, weight=1)
         toolbar = ttk.Frame(self.root, padding=(16, 12))
         toolbar.grid(row=0, column=0, sticky="ew")
         ttk.Label(toolbar, text="性能计数器日志查看器", font=("sans", 17, "bold")).pack(side="left")
@@ -90,9 +103,10 @@ class PerfViewerApp:
         ttk.Combobox(toolbar, textvariable=self.encoding, values=("UTF-8", "GB18030 / GBK"), state="readonly", width=16).pack(side="right")
         ttk.Label(toolbar, text="日志编码：").pack(side="right")
         ttk.Label(self.root, textvariable=self.files_text, padding=(16, 0, 16, 10), wraplength=1300).grid(row=1, column=0, sticky="ew")
+        self.build_run_controls()
 
         panes = ttk.Panedwindow(self.root, orient="horizontal")
-        panes.grid(row=2, column=0, sticky="nsew", padx=16)
+        panes.grid(row=3, column=0, sticky="nsew", padx=16)
         sidebar = ttk.Frame(panes, padding=(0, 0, 12, 0), width=285)
         content = ttk.Frame(panes)
         panes.add(sidebar, weight=0)
@@ -179,10 +193,69 @@ class PerfViewerApp:
         ttk.Button(pager, text="查看原始行", command=self.show_original).pack(side="left", padx=12)
         ttk.Combobox(pager, textvariable=self.page_size, values=("100", "200", "500"), state="readonly", width=5).pack(side="right")
         ttk.Label(pager, text="每页条数：").pack(side="right")
-        ttk.Label(self.root, textvariable=self.status, anchor="w", padding=(16, 12), wraplength=1300).grid(row=3, column=0, sticky="ew")
-        ttk.Label(self.root, text="基准匹配：模块＋路径＋名称。差值＝当前−基准，幅度＝差值/|基准|。上升/下降不代表性能好坏；双击查看原文。", padding=(16, 0, 16, 12)).grid(row=4, column=0, sticky="w")
+        ttk.Label(self.root, textvariable=self.status, anchor="w", padding=(16, 12), wraplength=1300).grid(row=4, column=0, sticky="ew")
+        ttk.Label(self.root, text="基准匹配：模块＋路径＋名称。差值＝当前−基准，幅度＝差值/|基准|。上升/下降不代表性能好坏；双击查看原文。", padding=(16, 0, 16, 12)).grid(row=5, column=0, sticky="w")
+
+    def build_run_controls(self):
+        frame = ttk.Frame(self.root, padding=(16, 0, 16, 10))
+        frame.grid(row=2, column=0, sticky="ew")
+        frame.columnconfigure(1, weight=1)
+        self.directory_buttons = []
+        for row, (label, variable, baseline) in enumerate((("当前运行目录：", self.current_directory, False),
+                                                        ("基准运行目录：", self.baseline_directory, True))):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            entry = ttk.Entry(frame, textvariable=variable)
+            entry.grid(row=row, column=1, sticky="ew", padx=8, pady=3)
+            entry.bind("<Return>", lambda _, b=baseline: self.open_directory(baseline=b))
+            for column, text, choose in ((2, "选择目录…", True), (3, "加载目录", False)):
+                button = ttk.Button(frame, text=text, command=lambda b=baseline, c=choose: self.open_directory(baseline=b, choose=c))
+                button.grid(row=row, column=column, padx=(4, 0))
+                self.directory_buttons.append(button)
+        self.run_details = ttk.Frame(frame, padding=(0, 8, 0, 0))
+        self.run_details.grid(row=2, column=0, columnspan=4, sticky="ew")
+        self.run_details.columnconfigure(0, weight=1)
+        selectors = ttk.Frame(self.run_details)
+        selectors.grid(row=0, column=0, sticky="ew")
+        ttk.Label(selectors, text="SPEC 子项：").pack(side="left")
+        self.benchmark_combo = ttk.Combobox(selectors, textvariable=self.benchmark, state="readonly", width=28)
+        self.benchmark_combo.pack(side="left", padx=(0, 16))
+        self.benchmark_combo.bind("<<ComboboxSelected>>", lambda _: self.select_benchmark())
+        ttk.Label(selectors, text="checkpoint：").pack(side="left")
+        self.checkpoint_combo = ttk.Combobox(selectors, textvariable=self.checkpoint, state="readonly", width=18)
+        self.checkpoint_combo.pack(side="left", padx=(0, 16))
+        self.checkpoint_combo.bind("<<ComboboxSelected>>", lambda _: self.select_checkpoint())
+        ttk.Label(selectors, textvariable=self.checkpoint_presence).pack(side="left")
+        files = ttk.Frame(self.run_details, padding=(0, 6, 0, 6))
+        files.grid(row=1, column=0, sticky="ew")
+        files.columnconfigure(1, weight=1)
+        files.columnconfigure(3, weight=1)
+        self.run_file_combos = {}
+        for name, label, row, column in (("current_perf", "当前 .perf：", 0, 0), ("baseline_perf", "基准 .perf：", 0, 2),
+                                         ("current_log", "当前 .log：", 1, 0), ("baseline_log", "基准 .log：", 1, 2)):
+            ttk.Label(files, text=label).grid(row=row, column=column, sticky="w", pady=2)
+            combo = ttk.Combobox(files, textvariable=self.run_files[name], state="readonly", width=45)
+            combo.grid(row=row, column=column + 1, sticky="ew", padx=(4, 12), pady=2)
+            combo.bind("<<ComboboxSelected>>", lambda _: self.reload_checkpoint())
+            self.run_file_combos[name] = combo
+        columns = ("metric", "baseline_value", "value", "delta", "percent", "direction")
+        self.summary_table = ttk.Treeview(self.run_details, columns=columns, show="headings", height=3)
+        for name, title, width in zip(columns, ("主日志指标（最后一次）", "基准值", "当前值", "差值", "变化百分比", "状态"),
+                                      (220, 160, 160, 150, 150, 100)):
+            self.summary_table.heading(name, text=title)
+            self.summary_table.column(name, width=width, minwidth=65, anchor="w" if name in ("metric", "direction") else "e")
+        for name, color in (("上升", "#215ca5"), ("下降", "#ad5718"), ("新增", "#74439b"), ("缺失", "#74439b")):
+            self.summary_table.tag_configure(name, foreground=color)
+        self.summary_table.grid(row=2, column=0, sticky="ew")
+        scroll = ttk.Scrollbar(self.run_details, orient="vertical", command=self.summary_table.yview)
+        scroll.grid(row=2, column=1, sticky="ns")
+        self.summary_table.configure(yscrollcommand=scroll.set)
+        self.summary_table.bind("<Double-1>", lambda _: self.show_summary_original())
+        ttk.Label(self.run_details, text="目录按子项名＋checkpoint 名配对；主日志指标取最后一次输出，可双击查看来源。IPC 的统计区间以原日志为准。").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.run_details.grid_remove()
 
     def configure_table(self):
+        self.table.delete(*self.table.get_children())
+        self.rows = {}
         if self.active_store is self.comparison:
             definitions = (("metric", "计数器名称", 270), ("baseline_value", "基准值", 110), ("value", "当前值", 110),
                            ("delta", "差值", 130), ("percent", "变化百分比", 135), ("direction", "方向", 80),
@@ -226,22 +299,187 @@ class PerfViewerApp:
                     messagebox.showerror("操作失败", str(error), parent=self.root)
             else:
                 success(result)
-        self.root.after(50, self.poll)
+        self.poll_timer = self.root.after(50, self.poll)
 
     def choose_file(self, baseline=False):
         if self.loading or self.exporting:
             return
-        filename = filedialog.askopenfilename(parent=self.root, title="打开基准日志" if baseline else "打开当前日志", filetypes=(("日志文件", "*.log *.txt *.out"), ("所有文件", "*")))
+        filename = filedialog.askopenfilename(parent=self.root, title="打开基准日志" if baseline else "打开当前日志", filetypes=(("日志文件", "*.perf *.log *.txt *.out"), ("所有文件", "*")))
         if filename:
             self.load_file(filename, baseline)
+
+    def open_directory(self, path=None, baseline=False, choose=False):
+        if self.loading or self.exporting:
+            return
+        variable = self.baseline_directory if baseline else self.current_directory
+        if choose:
+            path = filedialog.askdirectory(parent=self.root, title="选择基准运行结果目录" if baseline else "选择当前运行结果目录")
+            if not path:
+                return
+        path = path if path is not None else variable.get().strip()
+        if not path:
+            self.status.set("请先输入或选择包含各个 SPEC 子项的运行结果根目录。")
+            return
+        self.set_loading(True)
+        self.status.set("正在扫描运行结果目录：" + str(path))
+        def success(run):
+            if baseline:
+                self.baseline_run = run
+            else:
+                self.current_run = run
+            variable.set(str(run.root))
+            self.run_mode = True
+            self.run_details.grid()
+            self.set_loading(False)
+            self.render_run_navigation()
+        def failure(error):
+            self.set_loading(False)
+            self.status.set("目录扫描失败：" + str(error))
+            messagebox.showerror("目录扫描失败", str(error), parent=self.root)
+            self.schedule_query()
+        self.submit(lambda: RunDirectory.scan(path), success, failure)
+
+    def render_run_navigation(self):
+        names = sorted({key[0] for key in paired_keys(self.current_run, self.baseline_run)})
+        self.benchmark_combo.configure(values=names)
+        if self.benchmark.get() not in names:
+            self.benchmark.set(names[0] if names else "")
+        self.select_benchmark()
+
+    def select_benchmark(self):
+        if self.loading or self.exporting:
+            return
+        checkpoints = [key[1] for key in paired_keys(self.current_run, self.baseline_run) if key[0] == self.benchmark.get()]
+        self.checkpoint_combo.configure(values=checkpoints)
+        if self.checkpoint.get() not in checkpoints:
+            self.checkpoint.set(checkpoints[0] if checkpoints else "")
+        self.select_checkpoint()
+
+    def select_checkpoint(self):
+        if self.loading or self.exporting:
+            return
+        key = self.benchmark.get(), self.checkpoint.get()
+        current = self.current_run.checkpoints.get(key) if self.current_run else None
+        baseline = self.baseline_run.checkpoints.get(key) if self.baseline_run else None
+        if current is None and baseline is None:
+            return
+        descriptions = []
+        for side, entry in (("current", current), ("baseline", baseline)):
+            if side == "baseline" and not self.baseline_run:
+                continue
+            label = "当前" if side == "current" else "基准"
+            descriptions.append(label + ("存在" if entry else "缺少 checkpoint"))
+            for extension, paths in (("perf", entry.perf if entry else ()), ("log", entry.logs if entry else ())):
+                name = side + "_" + extension
+                choices = {path.name: path for path in paths}
+                self.run_file_choices[name] = choices
+                self.run_file_combos[name].configure(values=list(choices), state="readonly" if choices else "disabled")
+                default = paths[-1] if extension == "perf" and paths else paths[0] if paths else None
+                self.run_files[name].set(default.name if default else "（缺少 ." + extension + "）")
+                if entry and not paths:
+                    descriptions.append(label + "缺少 ." + extension)
+                if len(paths) > 1:
+                    descriptions.append(label + f"有 {len(paths)} 份 .{extension}，请确认选择")
+        if not self.baseline_run:
+            for name in ("baseline_perf", "baseline_log"):
+                self.run_file_choices[name] = {}
+                self.run_files[name].set("（未打开基准目录）")
+                self.run_file_combos[name].configure(values=(), state="disabled")
+        self.checkpoint_presence.set(" · ".join(descriptions))
+        self.reload_checkpoint()
+
+    def reload_checkpoint(self):
+        if self.loading or self.exporting or not self.run_mode:
+            return
+        paths = {name: self.run_file_choices.get(name, {}).get(variable.get()) for name, variable in self.run_files.items()}
+        comparing = self.baseline_run is not None
+        encoding = "utf-8" if self.encoding.get() == "UTF-8" else "gb18030"
+        mode = "last" if self.compare_mode.get() == "最后一次" else "occurrence"
+        key = self.benchmark.get(), self.checkpoint.get()
+        self.set_loading(True)
+        self.status.set(f"正在读取 {key[0]} / {key[1]}…")
+        def operation():
+            result = load_checkpoint(paths["current_perf"], paths["baseline_perf"], paths["current_log"], paths["baseline_log"],
+                                     comparing, encoding, mode)
+            self.pending_views.append(result[:3])
+            return result
+        def success(result):
+            self.pending_views.remove(result[:3])
+            previous = self.store, self.baseline, self.comparison
+            self.store, self.baseline, self.comparison, summaries = result
+            self.source, self.baseline_source = paths["current_perf"], paths["baseline_perf"]
+            self.info = self.store.info
+            self.baseline_info = self.baseline.info if comparing else {"loaded": False}
+            self.active_store = self.comparison if comparing else self.store
+            self.table.delete(*self.table.get_children())
+            self.rows = {}
+            if self.module not in {item["name"] for item in self.active_store.info["modules"]}:
+                self.module = ""
+            self.direction.set("全部")
+            self.update_file_labels()
+            self.configure_table()
+            self.summary_table.delete(*self.summary_table.get_children())
+            self.summary_items = {}
+            for index, row in enumerate(summaries):
+                iid = "summary-" + str(index)
+                self.summary_items[iid] = row
+                self.summary_table.insert("", "end", iid=iid, values=[row[name] for name in self.summary_table["columns"]], tags=(row["direction"],))
+            self.summary_sources = paths
+            self.set_loading(False)
+            self.direction_combo.configure(state="readonly" if comparing else "disabled")
+            self.render_modules()
+            missing = [name for name in ("IPC", "cycle", "instrcount") if not any(row["metric"].endswith(name) and row["current"] for row in summaries)]
+            self.status.set(f"已打开 {key[0]} / {key[1]} · {self.active_store.info['records']:,} 条计数器" +
+                            (" · 当前主日志未识别：" + "、".join(missing) if missing else "") +
+                            (" · 多份文件请确认下拉选择" if any(len(v) > 1 for v in self.run_file_choices.values()) else ""))
+            self.schedule_query()
+            self.submit(lambda: [store.close() for store in previous], lambda _: None)
+        def failure(error):
+            self.set_loading(False)
+            self.status.set("checkpoint 打开失败，保留之前的结果：" + str(error))
+            messagebox.showerror("checkpoint 打开失败", str(error), parent=self.root)
+            self.schedule_query()
+        self.submit(operation, success, failure)
+
+    def show_summary_original(self):
+        selection = self.summary_table.selection()
+        if not selection or selection[0] not in self.summary_items:
+            return
+        row = self.summary_items[selection[0]]
+        pieces = []
+        for label, name, side in (("基准", "baseline_log", "baseline"), ("当前", "current_log", "current")):
+            value = row[side]
+            path = self.summary_sources.get(name)
+            pieces.append(f"{label}：{path or '缺少主日志'}\n" +
+                          (f"行号 {value.line or '计算值'}\n{value.raw}" if value else "（未识别该指标）"))
+        window = tk.Toplevel(self.root)
+        window.title("主日志指标来源 · " + row["metric"])
+        window.geometry("1100x350")
+        text = tk.Text(window, wrap="word", padx=12, pady=12)
+        text.pack(fill="both", expand=True)
+        original = "\n\n".join(pieces)
+        text.insert("1.0", ANSI.sub("", original))
+        text.configure(state="disabled")
+        ttk.Button(window, text="复制原文", command=lambda: self.copy(original)).pack(pady=8)
+
+    def clear_run_mode(self):
+        self.current_run = self.baseline_run = None
+        self.run_mode = False
+        self.current_directory.set("")
+        self.baseline_directory.set("")
+        self.run_details.grid_remove()
 
     def set_loading(self, loading):
         self.loading = loading
         self.query_id += 1
-        for button in (self.open_button, self.baseline_button):
+        for button in (self.open_button, self.baseline_button, *self.directory_buttons):
             button.configure(state="disabled" if loading or self.exporting else "normal")
-        self.remove_baseline_button.configure(state="normal" if self.baseline_info["loaded"] and not loading and not self.exporting else "disabled")
+        self.remove_baseline_button.configure(state="normal" if (self.baseline_info["loaded"] or self.baseline_run) and not loading and not self.exporting else "disabled")
         self.mode_combo.configure(state="readonly" if self.info["loaded"] and self.baseline_info["loaded"] and not loading and not self.exporting else "disabled")
+        for combo in (self.benchmark_combo, self.checkpoint_combo):
+            combo.configure(state="readonly" if self.run_mode and not loading and not self.exporting else "disabled")
+        for name, combo in self.run_file_combos.items():
+            combo.configure(state="readonly" if self.run_mode and self.run_file_choices.get(name) and not loading and not self.exporting else "disabled")
         if loading:
             self.csv_button.configure(state="disabled")
             self.log_button.configure(state="disabled")
@@ -250,6 +488,11 @@ class PerfViewerApp:
         self.files_text.set(f"当前：{self.source or '未打开'}    |    基准：{self.baseline_source or '未打开'}")
 
     def load_file(self, filename, baseline=False):
+        if self.loading or self.exporting:
+            return
+        if Path(filename).expanduser().is_dir():
+            self.open_directory(filename, baseline)
+            return
         path = Path(filename)
         encoding = "utf-8" if self.encoding.get() == "UTF-8" else "gb18030"
         target = self.baseline if baseline else self.store
@@ -259,6 +502,7 @@ class PerfViewerApp:
             with path.open("rb") as stream:
                 return target.load(stream, path.stat().st_size, path.name, encoding)
         def success(info):
+            self.clear_run_mode()
             if baseline:
                 self.baseline_source, self.baseline_info = path, info
             else:
@@ -312,6 +556,13 @@ class PerfViewerApp:
     def remove_baseline(self):
         if self.loading or self.exporting:
             return
+        if self.run_mode:
+            self.baseline_run = None
+            self.baseline_directory.set("")
+            if self.current_run:
+                self.render_run_navigation()
+                return
+            self.clear_run_mode()
         previous_baseline, previous_comparison = self.baseline, self.comparison
         self.baseline, self.comparison = LogStore(), ComparisonStore()
         self.baseline_source, self.baseline_info = None, {"loaded": False}
@@ -378,6 +629,8 @@ class PerfViewerApp:
         self.schedule_query()
 
     def refresh(self):
+        if self.debounce is not None:
+            self.root.after_cancel(self.debounce)
         self.debounce = None
         if not self.info["loaded"] or self.loading:
             return
@@ -460,6 +713,14 @@ class PerfViewerApp:
                                                defaultextension="." + kind, filetypes=((kind.upper() + " 文件", "*." + kind), ("所有文件", "*")))
         if not filename:
             return
+        sources = (self.source, self.baseline_source)
+        if self.run_mode:
+            sources += tuple(self.summary_sources.values())
+        destination = Path(filename)
+        if any(source and (destination.resolve() == source.resolve() or
+                           (destination.exists() and source.exists() and destination.samefile(source))) for source in sources):
+            messagebox.showerror("导出失败", "不能覆盖当前或基准的 .perf / .log 源文件，请选择其他文件名。", parent=self.root)
+            return
         self.exporting = True
         self.set_loading(False)
         self.csv_button.configure(state="disabled")
@@ -485,18 +746,24 @@ class PerfViewerApp:
 
     def close(self):
         self.closed = True
+        for timer in (self.poll_timer, self.debounce):
+            if timer is not None:
+                self.root.after_cancel(timer)
         self.root.destroy()
         def cleanup():
-            self.executor.shutdown(wait=True, cancel_futures=True)
+            self.executor.shutdown(wait=True)
             self.store.close()
             self.baseline.close()
             self.comparison.close()
+            for view in self.pending_views:
+                for store in view:
+                    store.close()
         threading.Thread(target=cleanup, name="perf-cleanup").start()
 
 
 def main():
     parser = argparse.ArgumentParser(description="独立桌面性能计数器日志查看器，适用于 Ubuntu / ETX 远程桌面")
-    parser.add_argument("log", nargs="?", help="可选：启动时打开的服务器日志")
+    parser.add_argument("log", nargs="?", help="可选：启动时打开的日志文件或运行结果根目录")
     parser.add_argument("--encoding", choices=("utf-8", "gb18030"), default="utf-8")
     args = parser.parse_args()
     try:
@@ -506,7 +773,7 @@ def main():
     app = PerfViewerApp(root)
     app.encoding.set("UTF-8" if args.encoding == "utf-8" else "GB18030 / GBK")
     if args.log:
-        root.after(100, lambda: app.load_file(args.log))
+        root.after(100, lambda: app.open_directory(args.log) if Path(args.log).expanduser().is_dir() else app.load_file(args.log))
     root.mainloop()
 
 

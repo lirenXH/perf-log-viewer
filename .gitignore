@@ -7,3 +7,4 @@ __pycache__/
 *.log
 !sample.log
 !sample_baseline.log
+!sample_runs/**/*.log
