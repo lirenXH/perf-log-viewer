@@ -128,6 +128,47 @@ class DesktopTests(unittest.TestCase):
         self.wait(lambda: destination.exists() and not self.app.exporting)
         self.assertIn("access", destination.read_text(encoding="utf-8-sig"))
 
+    def test_bulk_ipc_overview_filter_sort_export_refresh_and_sources(self):
+        self.make_checkpoint("current", "perl", "200", 20, "1.5")
+        self.make_checkpoint("baseline", "perl", "200", 20, "2")
+        self.load_directory("current")
+        self.load_directory("baseline", True)
+        view = self.app.open_ipc_overview()
+        self.wait(lambda: not view.loading and len(view.rows) == 5)
+        self.assertEqual({row["direction"] for row in view.rows}, {"新增", "缺失", "上升", "下降"})
+        view.direction.set("下降")
+        self.assertEqual(len(view.visible), 1)
+        self.assertEqual(view.visible[0]["percent"], "-25.00%")
+        view.direction.set("全部")
+        view.query.set("perl")
+        self.assertEqual(len(view.visible), 4)
+        view.sort_by("percent")
+        self.assertEqual(view.visible[0]["percent"], "-25.00%")
+        view.sort_by("percent")
+        self.assertEqual(view.visible[0]["percent"], "+25.00%")
+        view.table.selection_set("0")
+        view.show_original()
+        destination = self.path / "ipc.csv"
+        with patch("perf_viewer_gui.filedialog.asksaveasfilename", return_value=str(destination)):
+            view.export()
+        self.wait(lambda: not view.exporting and destination.exists())
+        self.assertEqual(len(destination.read_text(encoding="utf-8-sig").splitlines()), 5)
+        view.query.set("200")
+        excluded_source = next(row["current_log"] for row in view.rows if row["checkpoint"] == "10015")
+        before = excluded_source.read_bytes()
+        with patch("perf_viewer_gui.filedialog.asksaveasfilename", return_value=str(excluded_source)):
+            view.export()
+        self.wait(lambda: not view.exporting)
+        self.assertIn("不能覆盖", view.status.get())
+        self.assertEqual(excluded_source.read_bytes(), before)
+        self.make_checkpoint("current", "perl", "300", 30, "2")
+        self.make_checkpoint("baseline", "perl", "300", 30, "2")
+        view.refresh()
+        self.wait(lambda: not view.loading and len(view.rows) == 6)
+        view.close()
+        self.assertTrue(view.closed)
+        self.assertFalse(self.errors)
+
 
 if __name__ == "__main__":
     unittest.main()

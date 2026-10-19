@@ -1,6 +1,7 @@
 """Browse SPEC result directories and read simulator summaries without networking."""
 
 import io
+import csv
 import re
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
@@ -144,3 +145,75 @@ def load_checkpoint(current_perf, baseline_perf, current_log, baseline_log, comp
         for store in (current, baseline, comparison):
             store.close()
         raise
+
+
+def compare_run_ipc(current, baseline, encoding="utf-8"):
+    """Read all main logs; retain unmatched files and failed reads as visible rows."""
+    rows = []
+    for benchmark, checkpoint in paired_keys(current, baseline):
+        c_entry = current.checkpoints.get((benchmark, checkpoint))
+        b_entry = baseline.checkpoints.get((benchmark, checkpoint))
+        c_logs, b_logs = c_entry.logs if c_entry else (), b_entry.logs if b_entry else ()
+        if len(c_logs) <= 1 and len(b_logs) <= 1:
+            pairs = [("默认主日志", c_logs[0] if c_logs else None, b_logs[0] if b_logs else None)]
+        else:
+            c_names, b_names = {p.name: p for p in c_logs}, {p.name: p for p in b_logs}
+            pairs = [(name, c_names.get(name), b_names.get(name)) for name in sorted(c_names.keys() | b_names.keys())]
+        for name, c_path, b_path in pairs:
+            data, errors = {}, {}
+            for side, path in (("current", c_path), ("baseline", b_path)):
+                try:
+                    data[side] = read_summary(path, encoding)
+                except OSError as error:
+                    data[side] = {}
+                    errors[side] = str(error)
+            c_data, b_data = data["current"], data["baseline"]
+            cores = sorted({key[0] for key in c_data} | {key[0] for key in b_data}) or [""]
+            for core in cores:
+                c, b = c_data.get((core, "IPC")), b_data.get((core, "IPC"))
+                notes = []
+                for label, side, path, value in (("当前", "current", c_path, c), ("基准", "baseline", b_path, b)):
+                    if side in errors:
+                        notes.append(label + "读取失败：" + errors[side])
+                    elif path is None:
+                        notes.append(label + "缺少主日志")
+                    elif value is None:
+                        notes.append(label + "未识别该 core 的 IPC")
+                    elif value.derived:
+                        notes.append(label + "IPC 由 instrcount/cycle 计算")
+                delta, percent, direction = compare_values(c.value if c else None, b.value if b else None)
+                if (c_path and c is None) or (b_path and b is None) or (c is None and b is None):
+                    delta, percent, direction = "—", "—", "无法比较"
+                c_instr, b_instr = c_data.get((core, "instrcount")), b_data.get((core, "instrcount"))
+                if c_instr and b_instr and Decimal(c_instr.value) != Decimal(b_instr.value):
+                    notes.append("两边 instrcount 不同")
+                if len(c_logs) > 1 or len(b_logs) > 1:
+                    notes.append("多份日志按文件名配对")
+                rows.append({"benchmark": benchmark, "checkpoint": checkpoint, "log": name, "core": core or "（未标注）",
+                             "baseline_value": b.value if b else "—", "value": c.value if c else "—",
+                             "delta": delta, "percent": percent, "direction": direction, "note": "；".join(notes),
+                             "current_log": c_path, "baseline_log": b_path, "current": c, "baseline": b,
+                             "current_instr": c_instr, "baseline_instr": b_instr,
+                             "current_cycle": c_data.get((core, "cycle")), "baseline_cycle": b_data.get((core, "cycle"))})
+    return rows
+
+
+IPC_FIELDS = ("benchmark", "checkpoint", "log", "core", "baseline_value", "value", "delta", "percent", "direction", "note",
+              "baseline_log", "current_log")
+IPC_HEADERS = ("子项", "checkpoint", "日志配对", "core", "基准 IPC", "当前 IPC", "差值", "变化百分比", "方向", "备注",
+               "基准主日志", "当前主日志")
+
+
+def export_ipc_comparison(rows, destination, sources=()):
+    rows = list(rows)
+    target = Path(destination)
+    paths = [row[name] for row in rows for name in ("current_log", "baseline_log")] + list(sources)
+    for source in paths:
+        if source and (target.resolve() == source.resolve() or (target.exists() and source.exists() and target.samefile(source))):
+            raise ValueError("不能覆盖 IPC 对比的主日志，请选择其他导出文件名")
+    with target.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(IPC_HEADERS)
+        for row in rows:
+            writer.writerow([row[name] for name in IPC_FIELDS])
+    return len(rows)

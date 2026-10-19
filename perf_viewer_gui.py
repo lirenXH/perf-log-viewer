@@ -16,8 +16,9 @@ except ImportError:
     raise SystemExit(1)
 
 from perf_viewer import ANSI, LogStore, export_to_file
-from perf_compare import ComparisonStore, export_comparison
-from perf_runs import RunDirectory, paired_keys, load_checkpoint
+from perf_compare import ComparisonStore, decimal_value, export_comparison
+from perf_runs import (RunDirectory, paired_keys, load_checkpoint, compare_run_ipc,
+                       export_ipc_comparison, IPC_FIELDS, IPC_HEADERS)
 
 
 class PerfViewerApp:
@@ -49,6 +50,7 @@ class PerfViewerApp:
         self.run_file_choices = {}
         self.summary_items = {}
         self.pending_views = []
+        self.ipc_overview = None
         self.module = ""
         self.page = 1
         self.pages = 1
@@ -224,6 +226,8 @@ class PerfViewerApp:
         self.checkpoint_combo = ttk.Combobox(selectors, textvariable=self.checkpoint, state="readonly", width=18)
         self.checkpoint_combo.pack(side="left", padx=(0, 16))
         self.checkpoint_combo.bind("<<ComboboxSelected>>", lambda _: self.select_checkpoint())
+        self.ipc_overview_button = ttk.Button(selectors, text="全部 checkpoint 的 IPC 对比…", command=self.open_ipc_overview, state="disabled")
+        self.ipc_overview_button.pack(side="right", padx=(12, 0))
         ttk.Label(selectors, textvariable=self.checkpoint_presence).pack(side="left")
         files = ttk.Frame(self.run_details, padding=(0, 6, 0, 6))
         files.grid(row=1, column=0, sticky="ew")
@@ -469,6 +473,18 @@ class PerfViewerApp:
         self.baseline_directory.set("")
         self.run_details.grid_remove()
 
+    def open_ipc_overview(self):
+        if self.loading or self.exporting or not self.current_run or not self.baseline_run:
+            self.status.set("请先加载当前和基准两个运行结果目录。")
+            return
+        if self.ipc_overview and not self.ipc_overview.closed:
+            if (self.ipc_overview.current_root, self.ipc_overview.baseline_root) == (self.current_run.root, self.baseline_run.root):
+                self.ipc_overview.window.lift()
+                return self.ipc_overview
+            self.ipc_overview.close()
+        self.ipc_overview = IPCOverview(self)
+        return self.ipc_overview
+
     def set_loading(self, loading):
         self.loading = loading
         self.query_id += 1
@@ -480,6 +496,7 @@ class PerfViewerApp:
             combo.configure(state="readonly" if self.run_mode and not loading and not self.exporting else "disabled")
         for name, combo in self.run_file_combos.items():
             combo.configure(state="readonly" if self.run_mode and self.run_file_choices.get(name) and not loading and not self.exporting else "disabled")
+        self.ipc_overview_button.configure(state="normal" if self.current_run and self.baseline_run and not loading and not self.exporting else "disabled")
         if loading:
             self.csv_button.configure(state="disabled")
             self.log_button.configure(state="disabled")
@@ -759,6 +776,170 @@ class PerfViewerApp:
                 for store in view:
                     store.close()
         threading.Thread(target=cleanup, name="perf-cleanup").start()
+
+
+class IPCOverview:
+    """A snapshot of all main-log IPCs in the two selected run directories."""
+
+    def __init__(self, app):
+        self.app = app
+        self.current_root, self.baseline_root = app.current_run.root, app.baseline_run.root
+        self.encoding = "utf-8" if app.encoding.get() == "UTF-8" else "gb18030"
+        self.rows, self.visible = [], []
+        self.closed = self.loading = self.exporting = False
+        self.sort_column, self.reverse = None, False
+        self.window = tk.Toplevel(app.root)
+        self.window.title("全部 checkpoint 的 IPC 对比")
+        self.window.geometry("1450x740")
+        self.window.minsize(900, 450)
+        self.window.columnconfigure(0, weight=1)
+        self.window.rowconfigure(2, weight=1)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.query = tk.StringVar()
+        self.direction = tk.StringVar(value="全部")
+        self.status = tk.StringVar()
+        self.counts = tk.StringVar()
+        ttk.Label(self.window, text=f"当前：{self.current_root}\n基准：{self.baseline_root}", padding=12, wraplength=1350).grid(row=0, column=0, sticky="ew")
+        filters = ttk.Frame(self.window, padding=(12, 0, 12, 10))
+        filters.grid(row=1, column=0, sticky="ew")
+        filters.columnconfigure(1, weight=1)
+        ttk.Label(filters, text="搜索子项 / checkpoint / 日志：").grid(row=0, column=0, sticky="w")
+        ttk.Entry(filters, textvariable=self.query).grid(row=0, column=1, sticky="ew", padx=(4, 16))
+        ttk.Label(filters, text="变化：").grid(row=0, column=2)
+        ttk.Combobox(filters, textvariable=self.direction, values=("全部", "上升", "下降", "不变", "新增", "缺失", "无法比较"),
+                     width=12, state="readonly").grid(row=0, column=3, padx=(0, 12))
+        self.refresh_button = ttk.Button(filters, text="重新提取 IPC", command=self.refresh)
+        self.refresh_button.grid(row=0, column=4)
+        self.export_button = ttk.Button(filters, text="导出筛选结果 CSV…", command=self.export, state="disabled")
+        self.export_button.grid(row=0, column=5, padx=(12, 0))
+        ttk.Label(filters, textvariable=self.counts).grid(row=1, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        frame = ttk.Frame(self.window, padding=(12, 0))
+        frame.grid(row=2, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        self.columns = IPC_FIELDS[:10]
+        self.table = ttk.Treeview(frame, columns=self.columns, show="headings", selectmode="browse")
+        for name, title, width in zip(self.columns, IPC_HEADERS, (190, 100, 230, 100, 120, 120, 120, 135, 100, 370)):
+            self.table.heading(name, text=title, command=lambda n=name: self.sort_by(n))
+            self.table.column(name, width=width, minwidth=70, stretch=False,
+                              anchor="e" if name in ("baseline_value", "value", "delta", "percent") else "w")
+        for name, color in (("上升", "#215ca5"), ("下降", "#ad5718"), ("新增", "#74439b"), ("缺失", "#74439b"), ("无法比较", "#777777")):
+            self.table.tag_configure(name, foreground=color)
+        self.table.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(frame, orient="horizontal", command=self.table.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.table.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.table.bind("<Double-1>", lambda _: self.show_original())
+        self.table.bind("<Return>", lambda _: self.show_original())
+        footer = ttk.Frame(self.window, padding=12)
+        footer.grid(row=3, column=0, sticky="ew")
+        ttk.Button(footer, text="查看 IPC 来源", command=self.show_original).pack(side="right")
+        ttk.Label(footer, textvariable=self.status, wraplength=1150).pack(side="left")
+        ttk.Label(self.window, text="取每份主日志、每个 core 最后一次 IPC；双击查看来源，点击列头排序。变化百分比＝(当前−基准)/|基准|。不按 SimPoint 权重汇总。",
+                  padding=(12, 0, 12, 12), wraplength=1350).grid(row=4, column=0, sticky="w")
+        self.query.trace_add("write", lambda *_: self.render())
+        self.direction.trace_add("write", lambda *_: self.render())
+        self.refresh()
+
+    def refresh(self):
+        if self.closed or self.loading or self.exporting:
+            return
+        self.loading = True
+        self.refresh_button.configure(state="disabled")
+        self.export_button.configure(state="disabled")
+        self.status.set("正在提取两个目录下全部主日志的 IPC…")
+        def operation():
+            return compare_run_ipc(RunDirectory.scan(self.current_root), RunDirectory.scan(self.baseline_root), self.encoding)
+        def success(rows):
+            if self.closed:
+                return
+            self.loading = False
+            self.rows = rows
+            self.refresh_button.configure(state="normal")
+            self.status.set("提取完成。缺少日志或未识别 IPC 的条目均保留在表中；instrcount 不同会在备注提示。")
+            self.render()
+        def failure(error):
+            if not self.closed:
+                self.loading = False
+                self.refresh_button.configure(state="normal")
+                self.status.set("提取失败，保留上次结果：" + str(error))
+                self.render()
+        self.app.submit(operation, success, failure)
+
+    def render(self):
+        if self.closed:
+            return
+        words = self.query.get().casefold().split()
+        direction = self.direction.get()
+        self.visible = [row for row in self.rows if (direction == "全部" or row["direction"] == direction) and
+                        all(word in " ".join(str(row[name]) for name in IPC_FIELDS).casefold() for word in words)]
+        column = self.sort_column
+        if column in ("baseline_value", "value", "delta", "percent"):
+            numeric = [(decimal_value(row[column]), row) for row in self.visible]
+            valid = sorted(((value[0], row) for value, row in numeric if value is not None), key=lambda item: item[0], reverse=self.reverse)
+            self.visible = [row for _, row in valid] + [row for value, row in numeric if value is None]
+        elif column:
+            self.visible.sort(key=lambda row: int(row[column]) if column == "checkpoint" else row[column].casefold(), reverse=self.reverse)
+        self.table.delete(*self.table.get_children())
+        for index, row in enumerate(self.visible):
+            self.table.insert("", "end", iid=str(index), values=[row[name] for name in self.columns], tags=(row["direction"],))
+        counts = {name: sum(row["direction"] == name for row in self.rows) for name in ("上升", "下降", "不变", "新增", "缺失", "无法比较")}
+        self.counts.set(f"显示 {len(self.visible):,} / {len(self.rows):,} 条 IPC · " + " · ".join(f"{name} {count:,}" for name, count in counts.items()))
+        self.export_button.configure(state="normal" if self.visible and not self.loading and not self.exporting else "disabled")
+
+    def sort_by(self, column):
+        self.reverse = not self.reverse if self.sort_column == column else False
+        self.sort_column = column
+        self.render()
+
+    def show_original(self):
+        selection = self.table.selection()
+        if not selection:
+            return
+        row = self.visible[int(selection[0])]
+        parts = [f"{row['benchmark']} / {row['checkpoint']} / {row['core']}\n{row['note']}"]
+        for label, side in (("基准", "baseline"), ("当前", "current")):
+            parts.append(f"{label}主日志：{row[side + '_log'] or '缺少主日志'}")
+            for name, key in (("IPC", side), ("instrcount", side + "_instr"), ("cycle", side + "_cycle")):
+                value = row[key]
+                parts.append(f"{name}：{value.value} · 行号 {value.line or '计算值'}\n{value.raw}" if value else name + "：（未识别）")
+        original = "\n\n".join(parts)
+        window = tk.Toplevel(self.window)
+        window.title("IPC 来源 · " + row["benchmark"] + " / " + row["checkpoint"])
+        window.geometry("1100x550")
+        text = tk.Text(window, wrap="word", padx=12, pady=12)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", ANSI.sub("", original))
+        text.configure(state="disabled")
+        ttk.Button(window, text="复制原文", command=lambda: self.app.copy(original)).pack(pady=8)
+
+    def export(self):
+        if self.loading or self.exporting or not self.visible or self.closed:
+            return
+        destination = filedialog.asksaveasfilename(parent=self.window, title="导出全部筛选后的 IPC 对比", initialfile="ipc-comparison.csv",
+                                                  defaultextension=".csv", filetypes=(("CSV 文件", "*.csv"),))
+        if not destination:
+            return
+        rows = list(self.visible)
+        sources = [row[name] for row in self.rows for name in ("current_log", "baseline_log")]
+        self.exporting = True
+        self.refresh_button.configure(state="disabled")
+        self.export_button.configure(state="disabled")
+        def complete(message):
+            if not self.closed:
+                self.exporting = False
+                self.refresh_button.configure(state="normal")
+                self.status.set(message)
+                self.render()
+        self.app.submit(lambda: export_ipc_comparison(rows, destination, sources),
+                        lambda count: complete(f"已导出 {count:,} 条 IPC：{destination}"),
+                        lambda error: complete("导出失败：" + str(error)))
+
+    def close(self):
+        self.closed = True
+        self.window.destroy()
 
 
 def main():

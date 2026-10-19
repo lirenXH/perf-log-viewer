@@ -1,8 +1,12 @@
 import tempfile
 import unittest
+import csv
+import os
 from pathlib import Path
+from unittest.mock import patch
 
-from perf_runs import RunDirectory, load_checkpoint, paired_keys, read_summary, summary_rows
+from perf_runs import (RunDirectory, load_checkpoint, paired_keys, read_summary, summary_rows,
+                       compare_run_ipc, export_ipc_comparison)
 
 
 class RunDirectoryTests(unittest.TestCase):
@@ -73,6 +77,83 @@ class RunDirectoryTests(unittest.TestCase):
             self.addCleanup(store.close)
         self.assertEqual([row["value"] for row in current.query({})["rows"]], ["0", "5"])
         self.assertEqual({row["direction"] for row in summary}, {"未识别"})
+
+    def compare(self):
+        return compare_run_ipc(RunDirectory.scan(self.root / "current"), RunDirectory.scan(self.root / "baseline"))
+
+    def test_all_ipc_pairs_by_checkpoint_with_different_filenames_and_keeps_missing(self):
+        self.checkpoint("current", "perl", "180", {"new_timestamp.log": "IPC=3\nIPC=2.5\n", "extra_gzip_check.log": "IPC=999"})
+        self.checkpoint("baseline", "perl", "180", {"old_timestamp.log": "IPC=2"})
+        self.checkpoint("current", "gcc", "180", {"main.log": "IPC=0"})
+        self.checkpoint("baseline", "gcc", "180", {"main.log": "IPC=1"})
+        self.checkpoint("current", "perl", "10015", {"main.log": "IPC=3"})
+        self.checkpoint("baseline", "perl", "236", {"main.log": "IPC=1"})
+        self.checkpoint("current", "perl", "999", {"main.log": "no summary"})
+        self.checkpoint("baseline", "perl", "999", {"main.log": "IPC=1"})
+        rows = self.compare()
+        self.assertEqual(len(rows), 5)
+        by_key = {(row["benchmark"], row["checkpoint"]): row for row in rows}
+        self.assertEqual(by_key["perl", "180"]["percent"], "+25.00%")
+        self.assertEqual(by_key["gcc", "180"]["percent"], "-100.00%")
+        self.assertEqual(by_key["perl", "10015"]["direction"], "新增")
+        self.assertEqual(by_key["perl", "236"]["direction"], "缺失")
+        self.assertEqual(by_key["perl", "999"]["direction"], "无法比较")
+        self.assertIn("未识别", by_key["perl", "999"]["note"])
+
+    def test_all_ipc_keeps_every_main_log_pairs_multiple_by_filename_and_cores(self):
+        self.checkpoint("current", "gcc", "1240", {
+            "same.log": "Core 0: limit\nIPC=3\nCore 1: limit\nIPC=4\n",
+            "only-current.log": "IPC=2\n",
+        })
+        self.checkpoint("baseline", "gcc", "1240", {"same.log": "Core 0: limit\nIPC=2\nCore 1: limit\nIPC=5\n"})
+        rows = self.compare()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({row["direction"] for row in rows}, {"新增", "上升", "下降"})
+        self.assertTrue(all("多份日志按文件名" in row["note"] for row in rows))
+        self.assertEqual({row["core"] for row in rows if row["log"] == "same.log"}, {"Core 0", "Core 1"})
+
+    def test_all_ipc_read_error_and_empty_checkpoint_do_not_abort_other_logs(self):
+        self.checkpoint("current", "gcc", "1", {"bad.log": "IPC=2"})
+        self.checkpoint("baseline", "gcc", "1", {"main.log": "IPC=1"})
+        self.checkpoint("current", "gcc", "2", {})
+        self.checkpoint("baseline", "gcc", "2", {})
+        self.checkpoint("current", "gcc", "3", {"main.log": "IPC=2"})
+        self.checkpoint("baseline", "gcc", "3", {"main.log": "IPC=2"})
+        def read(path, encoding):
+            if path and path.name == "bad.log":
+                raise PermissionError("denied")
+            return read_summary(path, encoding)
+        with patch("perf_runs.read_summary", side_effect=read):
+            rows = self.compare()
+        self.assertEqual([row["direction"] for row in rows], ["无法比较", "无法比较", "不变"])
+        self.assertIn("读取失败", rows[0]["note"])
+        self.assertIn("缺少主日志", rows[1]["note"])
+
+    def test_all_ipc_notes_derived_values_and_instruction_count_difference(self):
+        self.checkpoint("current", "gcc", "1", {"main.log": "instrCnt=12, cycleCnt=4"})
+        self.checkpoint("baseline", "gcc", "1", {"main.log": "instrCnt=10, cycleCnt=5, IPC=2"})
+        row = self.compare()[0]
+        self.assertEqual(row["percent"], "+50.00%")
+        self.assertIn("由 instrcount/cycle 计算", row["note"])
+        self.assertIn("instrcount 不同", row["note"])
+
+    def test_ipc_csv_export_and_protect_all_source_files_and_hardlinks(self):
+        source = self.checkpoint("current", "gcc", "1", {"main.log": "IPC=2"}) / "main.log"
+        self.checkpoint("baseline", "gcc", "1", {"main.log": "IPC=1"})
+        rows = self.compare()
+        destination = self.root / "output.csv"
+        self.assertEqual(export_ipc_comparison(rows, destination), 1)
+        with destination.open(encoding="utf-8-sig", newline="") as stream:
+            values = list(csv.reader(stream))
+        self.assertEqual(values[1][4:9], ["1", "2", "+1", "+100.00%", "上升"])
+        alias = self.root / "alias.log"
+        os.link(source, alias)
+        for target in (source, alias):
+            with self.assertRaises(ValueError):
+                export_ipc_comparison(rows, target)
+        with self.assertRaises(ValueError):
+            export_ipc_comparison([], source, sources=(source,))
+        self.assertEqual(source.read_text(), "IPC=2")
 
 
 class SummaryTests(unittest.TestCase):
