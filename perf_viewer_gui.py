@@ -10,7 +10,7 @@ from pathlib import Path
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk, font as tkfont
 except ImportError:
     print("缺少 Tkinter。Ubuntu 22.04 请安装：sudo apt install python3-tk", file=sys.stderr)
     raise SystemExit(1)
@@ -74,7 +74,20 @@ class PerfViewerApp:
         self.match_text = tk.StringVar(value="尚未加载日志")
         self.selected_text = tk.StringVar(value="全部模块")
         self.page_text = tk.StringVar(value="1 / 1")
+        self.font_size = tk.StringVar(value="12")
+        self.applied_font_size = 12
+        self.body_font = tkfont.nametofont("TkDefaultFont", root=root)
+        self.bold_font = self.body_font.copy()
+        self.bold_font.configure(weight="bold")
+        self.title_font = self.bold_font.copy()
         self._build()
+        self.apply_font_size()
+        self.font_size.trace_add("write", lambda *_: self.apply_font_size())
+        for key in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            root.bind_all(key, lambda _: self.adjust_font_size(1))
+        for key in ("<Control-minus>", "<Control-KP_Subtract>"):
+            root.bind_all(key, lambda _: self.adjust_font_size(-1))
+        root.bind_all("<Control-0>", lambda _: self.adjust_font_size(reset=True))
         self.module_search.trace_add("write", lambda *_: self.render_modules())
         for variable in (self.keyword, self.path_filter, self.start_line, self.end_line, self.direction):
             variable.trace_add("write", self.schedule_query)
@@ -95,7 +108,12 @@ class PerfViewerApp:
         self.root.rowconfigure(3, weight=1)
         toolbar = ttk.Frame(self.root, padding=(16, 12))
         toolbar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(toolbar, text="性能计数器日志查看器", font=("sans", 17, "bold")).pack(side="left")
+        fontbar = ttk.Frame(toolbar, padding=(0, 8, 0, 0))
+        fontbar.pack(side="bottom", fill="x")
+        self.build_font_controls(fontbar)
+        self.details_button = ttk.Button(fontbar, text="收起目录详情", command=self.toggle_run_details, state="disabled")
+        self.details_button.pack(side="right")
+        ttk.Label(toolbar, text="性能计数器日志查看器", font=self.title_font).pack(side="left")
         self.open_button = ttk.Button(toolbar, text="打开当前日志…", command=self.choose_file)
         self.open_button.pack(side="right", padx=(12, 0))
         self.baseline_button = ttk.Button(toolbar, text="打开基准日志…", command=lambda: self.choose_file(True))
@@ -115,7 +133,7 @@ class PerfViewerApp:
         panes.add(content, weight=1)
         sidebar.columnconfigure(0, weight=1)
         sidebar.rowconfigure(2, weight=1)
-        ttk.Label(sidebar, text="模块", font=("sans", 11, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(sidebar, text="模块", font=self.bold_font).grid(row=0, column=0, sticky="w", pady=(0, 8))
         entry = ttk.Entry(sidebar, textvariable=self.module_search)
         entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         self.modules = ttk.Treeview(sidebar, columns=("count",), show="tree headings", selectmode="browse")
@@ -145,12 +163,11 @@ class PerfViewerApp:
         ranges = ttk.Frame(filters, padding=(0, 10, 0, 10))
         ranges.grid(row=3, column=0, columnspan=2, sticky="ew")
         ttk.Label(ranges, text="当前行号：").pack(side="left")
-        ttk.Entry(ranges, textvariable=self.start_line, width=10).pack(side="left")
+        ttk.Entry(ranges, textvariable=self.start_line, width=6).pack(side="left")
         ttk.Label(ranges, text=" 至 ").pack(side="left")
-        ttk.Entry(ranges, textvariable=self.end_line, width=10).pack(side="left")
+        ttk.Entry(ranges, textvariable=self.end_line, width=6).pack(side="left")
         ttk.Button(ranges, text="清除筛选", command=self.clear_filters).pack(side="left", padx=10)
-        comparison_options = ttk.Frame(filters, padding=(0, 0, 0, 10))
-        comparison_options.grid(row=4, column=0, columnspan=2, sticky="ew")
+        comparison_options = ranges
         ttk.Label(comparison_options, text="重复条目：").pack(side="left")
         self.mode_combo = ttk.Combobox(comparison_options, textvariable=self.compare_mode, values=("逐次配对", "最后一次"), state="disabled", width=12)
         self.mode_combo.pack(side="left", padx=(0, 16))
@@ -161,7 +178,7 @@ class PerfViewerApp:
         summary = ttk.Frame(content, padding=(0, 4, 0, 10))
         summary.grid(row=1, column=0, sticky="ew")
         summary.columnconfigure(0, weight=1)
-        ttk.Label(summary, textvariable=self.match_text, font=("sans", 11, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.match_text, font=self.bold_font).grid(row=0, column=0, sticky="w")
         ttk.Label(summary, textvariable=self.selected_text).grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.csv_button = ttk.Button(summary, text="导出 CSV…", command=lambda: self.export("csv"), state="disabled")
         self.csv_button.grid(row=0, column=1, rowspan=2, padx=4)
@@ -197,6 +214,58 @@ class PerfViewerApp:
         ttk.Label(pager, text="每页条数：").pack(side="right")
         ttk.Label(self.root, textvariable=self.status, anchor="w", padding=(16, 12), wraplength=1300).grid(row=4, column=0, sticky="ew")
         ttk.Label(self.root, text="基准匹配：模块＋路径＋名称。差值＝当前−基准，幅度＝差值/|基准|。上升/下降不代表性能好坏；双击查看原文。", padding=(16, 0, 16, 12)).grid(row=5, column=0, sticky="w")
+
+    def build_font_controls(self, parent):
+        ttk.Label(parent, text="字号：").pack(side="left")
+        ttk.Button(parent, text="−", width=3, command=lambda: self.adjust_font_size(-1)).pack(side="left")
+        ttk.Combobox(parent, textvariable=self.font_size, values=tuple(str(n) for n in range(8, 25)),
+                     state="readonly", width=4).pack(side="left", padx=6)
+        ttk.Button(parent, text="＋", width=3, command=lambda: self.adjust_font_size(1)).pack(side="left")
+        ttk.Button(parent, text="恢复默认", command=lambda: self.adjust_font_size(reset=True)).pack(side="left", padx=8)
+        ttk.Label(parent, text="Ctrl + / Ctrl − 缩放，Ctrl 0 恢复默认；所有窗口同步。").pack(side="left")
+
+    def toggle_run_details(self):
+        if not self.run_mode:
+            return
+        if self.run_details.winfo_manager():
+            self.run_details.grid_remove()
+            self.details_button.configure(text="展开目录详情")
+        else:
+            self.run_details.grid()
+            self.details_button.configure(text="收起目录详情")
+
+    def adjust_font_size(self, delta=0, reset=False):
+        self.font_size.set(str(12 if reset else max(8, min(24, self.applied_font_size + delta))))
+        return "break"
+
+    def apply_font_size(self):
+        try:
+            size = int(self.font_size.get())
+        except ValueError:
+            return
+        if not 8 <= size <= 24:
+            return
+        ratio = size / self.applied_font_size
+        for name in tkfont.names(root=self.root):
+            if name.startswith("Tk"):
+                tkfont.nametofont(name, root=self.root).configure(size=size)
+        self.bold_font.configure(size=size)
+        self.title_font.configure(size=size + 5)
+        style = ttk.Style(self.root)
+        style.configure(".", font=self.body_font)
+        style.configure("Treeview", font=self.body_font, rowheight=self.body_font.metrics("linespace") + 12)
+        style.configure("Treeview.Heading", font=self.bold_font)
+        self.root.option_add("*TCombobox*Listbox.font", self.body_font)
+        # Preserve user-adjusted widths while making room for larger glyphs.
+        def resize_tables(widget):
+            if isinstance(widget, ttk.Treeview):
+                for column in ("#0", *widget["columns"]):
+                    width = widget.column(column, "width")
+                    widget.column(column, width=max(widget.column(column, "minwidth"), round(width * ratio)))
+            for child in widget.winfo_children():
+                resize_tables(child)
+        resize_tables(self.root)
+        self.applied_font_size = size
 
     def build_run_controls(self):
         frame = ttk.Frame(self.root, padding=(16, 0, 16, 10))
@@ -272,7 +341,7 @@ class PerfViewerApp:
         self.table.configure(columns=self.columns)
         for name, title, width in definitions:
             self.table.heading(name, text=title)
-            self.table.column(name, width=width, minwidth=60, stretch=False,
+            self.table.column(name, width=round(width * self.applied_font_size / 12), minwidth=60, stretch=False,
                               anchor="e" if name in ("line", "baseline_line", "value", "baseline_value", "delta", "percent", "occurrence") else "w")
 
     def submit(self, operation, success, failure=None):
@@ -334,6 +403,7 @@ class PerfViewerApp:
             variable.set(str(run.root))
             self.run_mode = True
             self.run_details.grid()
+            self.details_button.configure(text="收起目录详情")
             self.set_loading(False)
             self.render_run_navigation()
         def failure(error):
@@ -497,6 +567,7 @@ class PerfViewerApp:
         for name, combo in self.run_file_combos.items():
             combo.configure(state="readonly" if self.run_mode and self.run_file_choices.get(name) and not loading and not self.exporting else "disabled")
         self.ipc_overview_button.configure(state="normal" if self.current_run and self.baseline_run and not loading and not self.exporting else "disabled")
+        self.details_button.configure(state="normal" if self.run_mode else "disabled")
         if loading:
             self.csv_button.configure(state="disabled")
             self.log_button.configure(state="disabled")
@@ -766,6 +837,7 @@ class PerfViewerApp:
         for timer in (self.poll_timer, self.debounce):
             if timer is not None:
                 self.root.after_cancel(timer)
+        self.root.update_idletasks()
         self.root.destroy()
         def cleanup():
             self.executor.shutdown(wait=True)
@@ -821,7 +893,7 @@ class IPCOverview:
         self.table = ttk.Treeview(frame, columns=self.columns, show="headings", selectmode="browse")
         for name, title, width in zip(self.columns, IPC_HEADERS, (190, 100, 230, 100, 120, 120, 120, 135, 100, 370)):
             self.table.heading(name, text=title, command=lambda n=name: self.sort_by(n))
-            self.table.column(name, width=width, minwidth=70, stretch=False,
+            self.table.column(name, width=round(width * app.applied_font_size / 12), minwidth=70, stretch=False,
                               anchor="e" if name in ("baseline_value", "value", "delta", "percent") else "w")
         for name, color in (("上升", "#215ca5"), ("下降", "#ad5718"), ("新增", "#74439b"), ("缺失", "#74439b"), ("无法比较", "#777777")):
             self.table.tag_configure(name, foreground=color)
@@ -839,6 +911,9 @@ class IPCOverview:
         ttk.Label(footer, textvariable=self.status, wraplength=1150).pack(side="left")
         ttk.Label(self.window, text="取每份主日志、每个 core 最后一次 IPC；双击查看来源，点击列头排序。变化百分比＝(当前−基准)/|基准|。不按 SimPoint 权重汇总。",
                   padding=(12, 0, 12, 12), wraplength=1350).grid(row=4, column=0, sticky="w")
+        fontbar = ttk.Frame(self.window, padding=(12, 0, 12, 12))
+        fontbar.grid(row=5, column=0, sticky="ew")
+        app.build_font_controls(fontbar)
         self.query.trace_add("write", lambda *_: self.render())
         self.direction.trace_add("write", lambda *_: self.render())
         self.refresh()

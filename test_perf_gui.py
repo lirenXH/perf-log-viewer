@@ -43,6 +43,38 @@ class DesktopTests(unittest.TestCase):
         (path / f"_{checkpoint}_0.153974_gzip_check.log").write_text("IPC = 999", encoding="utf-8")
         return path
 
+    def test_font_size_changes_all_windows_rows_and_new_tables(self):
+        from tkinter import ttk, font as tkfont
+        initial_height = int(ttk.Style(self.root).lookup("Treeview", "rowheight"))
+        self.app.font_size.set("16")
+        self.assertEqual(self.app.body_font.cget("size"), 16)
+        self.assertGreater(int(ttk.Style(self.root).lookup("Treeview", "rowheight")), initial_height)
+        self.load_directory("current")
+        self.load_directory("baseline", True)
+        self.app.toggle_run_details()
+        self.assertFalse(self.app.run_details.winfo_manager())
+        self.app.toggle_run_details()
+        self.assertEqual(self.app.run_details.winfo_manager(), "grid")
+        view = self.app.open_ipc_overview()
+        self.wait(lambda: not view.loading)
+        self.assertEqual(view.table.column("value", "width"), 160)
+        view.table.selection_set("0")
+        view.show_original()
+        self.app.font_size.set("18")
+        self.assertEqual(tkfont.nametofont("TkFixedFont", root=self.root).cget("size"), 18)
+        self.assertEqual(view.table.column("value", "width"), 180)
+        self.root.update()
+        self.app.adjust_font_size(reset=True)
+        self.assertEqual(self.app.body_font.cget("size"), 12)
+        self.assertEqual(int(ttk.Style(self.root).lookup("Treeview", "rowheight")), initial_height)
+        self.app.font_size.set("24")
+        self.app.adjust_font_size(1)
+        self.assertEqual(self.app.applied_font_size, 24)
+        self.app.font_size.set("8")
+        self.app.adjust_font_size(-1)
+        self.assertEqual(self.app.applied_font_size, 8)
+        self.assertFalse(self.errors)
+
     def wait(self, condition, seconds=12):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
