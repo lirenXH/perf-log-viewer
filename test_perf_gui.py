@@ -75,6 +75,43 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.app.applied_font_size, 8)
         self.assertFalse(self.errors)
 
+    def test_simulation_status_auto_scan_colors_refresh_filter_and_source_view(self):
+        import tkinter as tk
+        passed = self.path / "current" / "perl" / "10015" / "_10015_0.153974.log"
+        passed.write_text("Core 0: EXCEEDING CYCLE/INSTR LIMIT at pc=0x118cc\nIPC=0.895375\n")
+        unfinished = self.path / "current" / "gcc" / "180" / "_180_0.153974.log"
+        unfinished.write_text("checkpoint restore!\n")
+        self.load_directory("current")
+        self.assertEqual(len(self.app.check_items), 3)
+        self.assertEqual(self.app.sidebar_tabs.select(), str(self.app.check_tab))
+        self.assertEqual({row["result"] for row in self.app.check_items.values()}, {"PASS", "FAIL", "未判定"})
+        for name, color in (("PASS", "#008000"), ("FAIL", "#cc0000"), ("未判定", "#000000")):
+            self.assertEqual(self.app.check_table.tag_configure(name)["foreground"], color)
+        self.app.check_filter.set("PASS")
+        self.assertEqual(len(self.app.check_items), 1)
+        self.app.check_table.selection_set("0")
+        window = self.app.show_simulation_log()
+        def texts(widget):
+            return ([widget] if isinstance(widget, tk.Text) else []) + [text for child in widget.winfo_children() for text in texts(child)]
+        text = texts(window)[0]
+        self.wait(lambda: "EXCEEDING" in text.get("1.0", "end"))
+        self.assertEqual(text["state"], "disabled")
+        self.assertTrue(text.tag_ranges("match"))
+        unfinished.write_text("INSTR LIMIT\nIPC=1\n")
+        self.app.refresh_run_checks()
+        self.wait(lambda: not self.app.loading and len(self.app.check_items) == 2)
+        self.app.check_filter.set("全部")
+        self.load_directory("baseline", True)
+        self.assertEqual(len(self.app.check_items), 5)
+        self.app.check_query.set("基准 perl")
+        self.assertEqual(len(self.app.check_items), 2)
+        self.app.check_query.set("")
+        previous = self.app.store
+        self.app.remove_baseline()
+        self.wait(lambda: not self.app.loading and self.app.store is not previous)
+        self.assertEqual(len(self.app.check_items), 3)
+        self.assertFalse(self.errors)
+
     def wait(self, condition, seconds=12):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:

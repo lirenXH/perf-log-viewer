@@ -54,6 +54,38 @@ def paired_keys(current=None, baseline=None):
     return sorted(keys, key=lambda key: (key[0], checkpoint_sort(key[1])))
 
 
+def check_simulation_log(path, encoding="utf-8"):
+    """Use the user's literal keywords, with INSTR LIMIT taking precedence."""
+    ipc = None
+    try:
+        with Path(path).open(encoding=encoding, errors="replace") as stream:
+            for number, raw in enumerate(stream, 1):
+                clean = VISIBLE_ANSI.sub("", ANSI.sub("", raw))
+                if "INSTR LIMIT" in clean:
+                    return {"result": "PASS", "reason": "包含 INSTR LIMIT", "line": number, "raw": raw.rstrip("\r\n")}
+                if ipc is None and "IPC" in clean:
+                    ipc = number, raw.rstrip("\r\n")
+    except OSError as error:
+        return {"result": "未判定", "reason": "读取失败：" + str(error), "line": 0, "raw": ""}
+    if ipc:
+        return {"result": "FAIL", "reason": "包含 IPC，但没有 INSTR LIMIT", "line": ipc[0], "raw": ipc[1]}
+    return {"result": "未判定", "reason": "没有 INSTR LIMIT 或 IPC", "line": 0, "raw": ""}
+
+
+def check_run_status(run, encoding="utf-8"):
+    rows = []
+    for benchmark, checkpoint in paired_keys(run):
+        entry = run.checkpoints[benchmark, checkpoint]
+        logs = [path for path in entry.logs if path.name.startswith("_")]
+        if not logs:
+            rows.append({"benchmark": benchmark, "checkpoint": checkpoint, "path": None,
+                         "result": "未判定", "reason": "缺少以下划线开头的主 .log", "line": 0, "raw": ""})
+        for path in logs:
+            rows.append({"benchmark": benchmark, "checkpoint": checkpoint, "path": path,
+                         **check_simulation_log(path, encoding)})
+    return rows
+
+
 # Both compact aliases and the stock XiangShan trap summary are accepted.
 SUMMARY_NUMBER = r"[-+]?(?:\d{1,3}(?:[, '\u00a0]\d{3})+|\d+)(?:\.\d*)?(?:[eE][-+]?\d+)?|[-+]?\.\d+(?:[eE][-+]?\d+)?"
 ALIASES = {

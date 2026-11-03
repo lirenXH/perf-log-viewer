@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from perf_runs import (RunDirectory, load_checkpoint, paired_keys, read_summary, summary_rows,
-                       compare_run_ipc, export_ipc_comparison)
+                       compare_run_ipc, export_ipc_comparison, check_simulation_log, check_run_status)
 
 
 class RunDirectoryTests(unittest.TestCase):
@@ -80,6 +80,36 @@ class RunDirectoryTests(unittest.TestCase):
 
     def compare(self):
         return compare_run_ipc(RunDirectory.scan(self.root / "current"), RunDirectory.scan(self.root / "baseline"))
+
+    def test_simulation_status_keyword_precedence_ansi_and_unfinished_logs(self):
+        cases = (("Core 0: \x1b[33mEXCEEDING CYCLE/INSTR LIMIT at pc=0x118cc\nIPC=0.895375", "PASS", 1),
+                 ("IPC=1\n^[[33mEXCEEDING CYCLE/INSTR LIMIT\n", "PASS", 2),
+                 ("HIT BAD TRAP\nIPC=1\n", "FAIL", 2),
+                 ("IPC=0", "FAIL", 1), ("checkpoint restore!\n", "未判定", 0), ("", "未判定", 0))
+        for index, (contents, result, line) in enumerate(cases):
+            path = self.root / f"_{index}.log"
+            path.write_text(contents)
+            checked = check_simulation_log(path)
+            self.assertEqual((checked["result"], checked["line"]), (result, line))
+        self.assertEqual(check_simulation_log(self.root / "missing.log")["result"], "未判定")
+
+    def test_run_status_checks_only_underscore_main_logs_and_retains_all_files(self):
+        self.checkpoint("current", "perl", "180", {"_180_0.01.log": "INSTR LIMIT\nIPC=1",
+            "_180_other.log": "IPC=1", "_180_gzip_check.log": "IPC=999", "not_sim.log": "IPC=999"})
+        self.checkpoint("current", "gcc", "236", {"_236_0.02.log": "running"})
+        self.checkpoint("current", "gcc", "999", {"_999_gzip_check.log": "INSTR LIMIT"})
+        rows = check_run_status(RunDirectory.scan(self.root / "current"))
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([row["result"] for row in rows], ["未判定", "未判定", "PASS", "FAIL"])
+        self.assertIsNone(rows[1]["path"])
+        self.assertTrue(all(row["path"] is None or row["path"].name.startswith("_") for row in rows))
+
+    def test_status_missing_and_unreadable_log_are_not_fail(self):
+        directory = self.checkpoint("current", "perl", "1", {"_1.log": "IPC=1"})
+        with patch.object(Path, "open", side_effect=PermissionError("denied")):
+            checked = check_simulation_log(directory / "_1.log")
+        self.assertEqual(checked["result"], "未判定")
+        self.assertIn("读取失败", checked["reason"])
 
     def test_all_ipc_pairs_by_checkpoint_with_different_filenames_and_keeps_missing(self):
         self.checkpoint("current", "perl", "180", {"new_timestamp.log": "IPC=3\nIPC=2.5\n", "extra_gzip_check.log": "IPC=999"})

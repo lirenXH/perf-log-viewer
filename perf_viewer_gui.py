@@ -18,7 +18,7 @@ except ImportError:
 from perf_viewer import ANSI, LogStore, export_to_file
 from perf_compare import ComparisonStore, decimal_value, export_comparison
 from perf_runs import (RunDirectory, paired_keys, load_checkpoint, compare_run_ipc,
-                       export_ipc_comparison, IPC_FIELDS, IPC_HEADERS)
+                       export_ipc_comparison, IPC_FIELDS, IPC_HEADERS, check_run_status)
 
 
 class PerfViewerApp:
@@ -51,6 +51,11 @@ class PerfViewerApp:
         self.summary_items = {}
         self.pending_views = []
         self.ipc_overview = None
+        self.run_checks = {"当前": [], "基准": []}
+        self.check_items = {}
+        self.check_query = tk.StringVar()
+        self.check_filter = tk.StringVar(value="全部")
+        self.check_counts = tk.StringVar(value="加载目录后自动检查主仿真日志")
         self.module = ""
         self.page = 1
         self.pages = 1
@@ -89,6 +94,8 @@ class PerfViewerApp:
             root.bind_all(key, lambda _: self.adjust_font_size(-1))
         root.bind_all("<Control-0>", lambda _: self.adjust_font_size(reset=True))
         self.module_search.trace_add("write", lambda *_: self.render_modules())
+        self.check_query.trace_add("write", lambda *_: self.render_run_checks())
+        self.check_filter.trace_add("write", lambda *_: self.render_run_checks())
         for variable in (self.keyword, self.path_filter, self.start_line, self.end_line, self.direction):
             variable.trace_add("write", self.schedule_query)
         self.page_size.trace_add("write", self.schedule_query)
@@ -127,10 +134,19 @@ class PerfViewerApp:
 
         panes = ttk.Panedwindow(self.root, orient="horizontal")
         panes.grid(row=3, column=0, sticky="nsew", padx=16)
-        sidebar = ttk.Frame(panes, padding=(0, 0, 12, 0), width=285)
+        sidebar = ttk.Frame(panes, padding=(0, 0, 12, 0), width=380)
+        sidebar.grid_propagate(False)
         content = ttk.Frame(panes)
         panes.add(sidebar, weight=0)
         panes.add(content, weight=1)
+        sidebar.columnconfigure(0, weight=1)
+        sidebar.rowconfigure(0, weight=1)
+        self.sidebar_tabs = ttk.Notebook(sidebar)
+        self.sidebar_tabs.grid(row=0, column=0, sticky="nsew")
+        module_tab = ttk.Frame(self.sidebar_tabs, padding=(0, 8, 0, 0))
+        self.sidebar_tabs.add(module_tab, text="性能模块")
+        self.build_status_panel()
+        sidebar = module_tab
         sidebar.columnconfigure(0, weight=1)
         sidebar.rowconfigure(2, weight=1)
         ttk.Label(sidebar, text="模块", font=self.bold_font).grid(row=0, column=0, sticky="w", pady=(0, 8))
@@ -223,6 +239,113 @@ class PerfViewerApp:
         ttk.Button(parent, text="＋", width=3, command=lambda: self.adjust_font_size(1)).pack(side="left")
         ttk.Button(parent, text="恢复默认", command=lambda: self.adjust_font_size(reset=True)).pack(side="left", padx=8)
         ttk.Label(parent, text="Ctrl + / Ctrl − 缩放，Ctrl 0 恢复默认；所有窗口同步。").pack(side="left")
+
+    def build_status_panel(self):
+        self.check_tab = ttk.Frame(self.sidebar_tabs, padding=(0, 8, 0, 0))
+        self.sidebar_tabs.add(self.check_tab, text="仿真状态")
+        self.check_tab.columnconfigure(0, weight=1)
+        self.check_tab.rowconfigure(3, weight=1)
+        ttk.Entry(self.check_tab, textvariable=self.check_query).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        controls = ttk.Frame(self.check_tab)
+        controls.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Combobox(controls, textvariable=self.check_filter, values=("全部", "PASS", "FAIL", "未判定"),
+                     width=9, state="readonly").pack(side="left")
+        self.check_refresh_button = ttk.Button(controls, text="重新检查", command=self.refresh_run_checks, state="disabled")
+        self.check_refresh_button.pack(side="right")
+        ttk.Label(self.check_tab, textvariable=self.check_counts, wraplength=320).grid(row=2, column=0, columnspan=2, sticky="w", pady=6)
+        self.check_table = ttk.Treeview(self.check_tab, columns=("benchmark", "checkpoint", "result", "side", "log", "reason"),
+                                       show="headings", selectmode="browse")
+        for name, label, width in (("benchmark", "子项", 170), ("checkpoint", "检查点", 85), ("result", "状态", 80),
+                                   ("side", "来源", 60), ("log", "主日志", 250), ("reason", "判断依据", 320)):
+            self.check_table.heading(name, text=label)
+            self.check_table.column(name, width=width, minwidth=55, stretch=False)
+        for name, color in (("PASS", "#008000"), ("FAIL", "#cc0000"), ("未判定", "#000000")):
+            self.check_table.tag_configure(name, foreground=color)
+        self.check_table.grid(row=3, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(self.check_tab, orient="vertical", command=self.check_table.yview)
+        vertical.grid(row=3, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(self.check_tab, orient="horizontal", command=self.check_table.xview)
+        horizontal.grid(row=4, column=0, sticky="ew")
+        self.check_table.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.check_table.bind("<Double-1>", lambda _: self.show_simulation_log())
+        self.check_table.bind("<Return>", lambda _: self.show_simulation_log())
+        ttk.Button(self.check_tab, text="查看仿真源日志", command=self.show_simulation_log).grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
+
+    def render_run_checks(self):
+        all_rows = [{**row, "side": side} for side, rows in self.run_checks.items() for row in rows]
+        words = self.check_query.get().casefold().split()
+        selected = self.check_filter.get()
+        rows = [row for row in all_rows if (selected == "全部" or row["result"] == selected) and
+                all(word in " ".join(str(row[key]) for key in ("benchmark", "checkpoint", "path", "side", "reason")).casefold() for word in words)]
+        self.check_table.delete(*self.check_table.get_children())
+        self.check_items = {}
+        for index, row in enumerate(rows):
+            iid = str(index)
+            self.check_items[iid] = row
+            self.check_table.insert("", "end", iid=iid,
+                values=(row["benchmark"], row["checkpoint"], row["result"], row["side"], row["path"].name if row["path"] else "（缺少主日志）", row["reason"]), tags=(row["result"],))
+        counts = {name: sum(row["result"] == name for row in all_rows) for name in ("PASS", "FAIL", "未判定")}
+        self.check_counts.set(f"显示 {len(rows)} / {len(all_rows)} · " + " · ".join(f"{name} {count}" for name, count in counts.items()))
+
+    def refresh_run_checks(self):
+        if self.loading or self.exporting or not self.run_mode:
+            return
+        roots = {side: run.root for side, run in (("当前", self.current_run), ("基准", self.baseline_run)) if run}
+        encoding = "utf-8" if self.encoding.get() == "UTF-8" else "gb18030"
+        self.set_loading(True)
+        self.status.set("正在重新检查全部主仿真日志…")
+        def success(results):
+            self.run_checks = {"当前": [], "基准": [], **results}
+            self.render_run_checks()
+            self.set_loading(False)
+            self.status.set("仿真状态检查完成。双击状态列表中的子项可查看主日志。")
+            self.schedule_query()
+        def failure(error):
+            self.set_loading(False)
+            self.status.set("检查失败，保留之前结果：" + str(error))
+            self.schedule_query()
+        self.submit(lambda: {side: check_run_status(RunDirectory.scan(path), encoding) for side, path in roots.items()}, success, failure)
+
+    def show_simulation_log(self):
+        selection = self.check_table.selection()
+        if not selection or selection[0] not in self.check_items:
+            return
+        row = self.check_items[selection[0]]
+        if row["path"] is None:
+            self.status.set(row["reason"])
+            return
+        window = tk.Toplevel(self.root)
+        window.title(f"{row['result']} · {row['benchmark']} / {row['checkpoint']} · {row['path'].name}")
+        window.geometry("1150x650")
+        ttk.Label(window, text=str(row["path"]), wraplength=1100, padding=8).pack(fill="x")
+        area = ttk.Frame(window)
+        area.pack(fill="both", expand=True)
+        area.columnconfigure(0, weight=1)
+        area.rowconfigure(0, weight=1)
+        text = tk.Text(area, wrap="none", padx=12, pady=12)
+        text.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(area, orient="vertical", command=text.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(area, orient="horizontal", command=text.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        text.insert("1.0", "正在读取源文件…")
+        text.configure(state="disabled")
+        encoding = "utf-8" if self.encoding.get() == "UTF-8" else "gb18030"
+        def success(contents):
+            if not window.winfo_exists():
+                return
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            text.insert("1.0", ANSI.sub("", contents))
+            if row["line"]:
+                text.tag_add("match", f"{row['line']}.0", f"{row['line']}.end")
+                text.tag_configure("match", background="#fff1ad", foreground="#000000")
+                text.see(f"{row['line']}.0")
+            text.configure(state="disabled")
+        self.submit(lambda: row["path"].read_text(encoding=encoding, errors="replace"), success,
+                    lambda error: success("读取失败：" + str(error)))
+        return window
 
     def toggle_run_details(self):
         if not self.run_mode:
@@ -394,8 +517,16 @@ class PerfViewerApp:
             self.status.set("请先输入或选择包含各个 SPEC 子项的运行结果根目录。")
             return
         self.set_loading(True)
-        self.status.set("正在扫描运行结果目录：" + str(path))
-        def success(run):
+        self.status.set("正在扫描目录并检查仿真状态：" + str(path))
+        encoding = "utf-8" if self.encoding.get() == "UTF-8" else "gb18030"
+        def operation():
+            run = RunDirectory.scan(path)
+            return run, check_run_status(run, encoding)
+        def success(result):
+            run, checks = result
+            self.run_checks["基准" if baseline else "当前"] = checks
+            self.render_run_checks()
+            self.sidebar_tabs.select(self.check_tab)
             if baseline:
                 self.baseline_run = run
             else:
@@ -411,7 +542,7 @@ class PerfViewerApp:
             self.status.set("目录扫描失败：" + str(error))
             messagebox.showerror("目录扫描失败", str(error), parent=self.root)
             self.schedule_query()
-        self.submit(lambda: RunDirectory.scan(path), success, failure)
+        self.submit(operation, success, failure)
 
     def render_run_navigation(self):
         names = sorted({key[0] for key in paired_keys(self.current_run, self.baseline_run)})
@@ -542,6 +673,9 @@ class PerfViewerApp:
         self.current_directory.set("")
         self.baseline_directory.set("")
         self.run_details.grid_remove()
+        self.run_checks = {"当前": [], "基准": []}
+        self.render_run_checks()
+        self.sidebar_tabs.select(0)
 
     def open_ipc_overview(self):
         if self.loading or self.exporting or not self.current_run or not self.baseline_run:
@@ -568,6 +702,7 @@ class PerfViewerApp:
             combo.configure(state="readonly" if self.run_mode and self.run_file_choices.get(name) and not loading and not self.exporting else "disabled")
         self.ipc_overview_button.configure(state="normal" if self.current_run and self.baseline_run and not loading and not self.exporting else "disabled")
         self.details_button.configure(state="normal" if self.run_mode else "disabled")
+        self.check_refresh_button.configure(state="normal" if self.run_mode and not loading and not self.exporting else "disabled")
         if loading:
             self.csv_button.configure(state="disabled")
             self.log_button.configure(state="disabled")
@@ -647,6 +782,8 @@ class PerfViewerApp:
         if self.run_mode:
             self.baseline_run = None
             self.baseline_directory.set("")
+            self.run_checks["基准"] = []
+            self.render_run_checks()
             if self.current_run:
                 self.render_run_navigation()
                 return
