@@ -1040,12 +1040,13 @@ class IPCOverview:
         frame.grid(row=2, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.columns = IPC_FIELDS[:10]
+        self.columns = IPC_FIELDS[:2] + ("weight",) + IPC_FIELDS[2:10]
+        self.column_titles = dict(zip(IPC_FIELDS, IPC_HEADERS))
         self.table = ttk.Treeview(frame, columns=self.columns, show="headings", selectmode="browse")
-        for name, title, width in zip(self.columns, IPC_HEADERS, (190, 100, 230, 100, 120, 120, 120, 135, 100, 370)):
-            self.table.heading(name, text=title, command=lambda n=name: self.sort_by(n))
+        for name, width in zip(self.columns, (190, 115, 110, 230, 100, 120, 120, 120, 150, 100, 370)):
+            self.table.heading(name, text=self.column_titles[name], command=lambda n=name: self.sort_by(n))
             self.table.column(name, width=round(width * app.applied_font_size / 12), minwidth=70, stretch=False,
-                              anchor="e" if name in ("baseline_value", "value", "delta", "percent") else "w")
+                              anchor="e" if name in ("weight", "baseline_value", "value", "delta", "percent") else "w")
         for name, color in (("上升", "#215ca5"), ("下降", "#ad5718"), ("新增", "#74439b"), ("缺失", "#74439b"), ("无法比较", "#777777")):
             self.table.tag_configure(name, foreground=color)
         self.table.grid(row=0, column=0, sticky="nsew")
@@ -1060,7 +1061,7 @@ class IPCOverview:
         footer.grid(row=3, column=0, sticky="ew")
         ttk.Button(footer, text="查看 IPC 来源", command=self.show_original).pack(side="right")
         ttk.Label(footer, textvariable=self.status, wraplength=1150).pack(side="left")
-        ttk.Label(self.window, text="取每份主日志、每个 core 最后一次 IPC；双击查看来源，点击列头排序。变化百分比＝(当前−基准)/|基准|。不按 SimPoint 权重汇总。",
+        ttk.Label(self.window, text="取每份主日志、每个 core 最后一次 IPC；双击查看来源，点击列头排序：▲ 升序，▼ 降序。变化百分比＝(当前−基准)/|基准|。不按 SimPoint 权重汇总。",
                   padding=(12, 0, 12, 12), wraplength=1350).grid(row=4, column=0, sticky="w")
         fontbar = ttk.Frame(self.window, padding=(12, 0, 12, 12))
         fontbar.grid(row=5, column=0, sticky="ew")
@@ -1121,7 +1122,7 @@ class IPCOverview:
         self.visible = [row for row in rows if (direction == "全部" or row["direction"] == direction) and
                         all(word in " ".join(str(row[name]) for name in IPC_FIELDS).casefold() for word in words)]
         column = self.sort_column
-        if column in ("baseline_value", "value", "delta", "percent"):
+        if column in ("weight", "baseline_value", "value", "delta", "percent"):
             numeric = [(decimal_value(row[column]), row) for row in self.visible]
             valid = sorted(((value[0], row) for value, row in numeric if value is not None), key=lambda item: item[0], reverse=self.reverse)
             self.visible = [row for _, row in valid] + [row for value, row in numeric if value is None]
@@ -1137,6 +1138,9 @@ class IPCOverview:
     def sort_by(self, column):
         self.reverse = not self.reverse if self.sort_column == column else False
         self.sort_column = column
+        for name, title in self.column_titles.items():
+            if name in self.columns:
+                self.table.heading(name, text=title + ((" ▼" if self.reverse else " ▲") if name == column else ""))
         self.render()
 
     def show_original(self):
@@ -1144,7 +1148,8 @@ class IPCOverview:
         if not selection:
             return
         row = self.visible[int(selection[0])]
-        parts = [f"{row['benchmark']} / {row['checkpoint']} / {row['core']}\n{row['note']}"]
+        parts = [f"{row['benchmark']} / {row['checkpoint']} / {row['core']}\n"
+                 f"权重：{row['weight']}（基准 {row['baseline_weight']}，当前 {row['current_weight']}）\n{row['note']}"]
         for label, side in (("基准", "baseline"), ("当前", "current")):
             parts.append(f"{label}主日志：{row[side + '_log'] or '缺少主日志'}")
             for name, key in (("IPC", side), ("instrcount", side + "_instr"), ("cycle", side + "_cycle")):

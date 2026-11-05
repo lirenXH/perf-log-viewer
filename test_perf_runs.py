@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from perf_runs import (RunDirectory, load_checkpoint, paired_keys, read_summary, summary_rows,
                        compare_run_ipc, export_ipc_comparison, check_simulation_log, check_run_status,
-                       filter_ipc_instrcount)
+                       filter_ipc_instrcount, log_weight)
 
 
 class RunDirectoryTests(unittest.TestCase):
@@ -207,6 +207,31 @@ class RunDirectoryTests(unittest.TestCase):
         self.assertIn("基准 95，当前 105", rejected[0]["note"])
         self.assertEqual(original[0]["percent"], "+50.00%")
         self.assertIn("两边 instrcount 不同", original[0]["note"])
+
+    def test_weights_from_main_log_names_and_mismatch_fallback(self):
+        for name, expected in (("_10549_0.005394.log", "0.005394"), ("10549_0.005394.log", "0.005394"),
+                               ("_10549_1e-3.log", "1e-3"), ("_10549_0.log", "0"), ("_10549_1.log", "1"),
+                               ("_10549_0.005394_gzip_check.log", "—"), ("_10549_20261103.log", "—"),
+                               ("_10549_1.5.log", "—"), ("_10548_0.005394.log", "—"), ("main.log", "—")):
+            self.assertEqual(log_weight(Path(name), "10549"), expected)
+        self.assertEqual(log_weight(None, "10549"), "—")
+        self.checkpoint("current", "gcc", "10549", {"_10549_0.005394.log": "IPC=3"})
+        self.checkpoint("baseline", "gcc", "10549", {"_10549_0.006.log": "IPC=2"})
+        self.checkpoint("current", "gcc", "180", {"main.log": "IPC=3"})
+        self.checkpoint("baseline", "gcc", "180", {"_180_0.001.log": "IPC=2"})
+        rows = self.compare()
+        self.assertEqual(rows[0]["weight"], "0.001")
+        self.assertEqual(rows[0]["current_weight"], "—")
+        row = rows[1]
+        self.assertEqual((row["weight"], row["baseline_weight"], row["current_weight"]), ("0.005394", "0.006", "0.005394"))
+        self.assertIn("权重不同", row["note"])
+        self.assertEqual(row["percent"], "+50.00%")
+        destination = self.root / "weights.csv"
+        export_ipc_comparison(rows, destination)
+        with destination.open(encoding="utf-8-sig", newline="") as stream:
+            exported = list(csv.DictReader(stream))
+        self.assertEqual(exported[1]["权重"], "0.005394")
+        self.assertEqual(exported[1]["基准权重"], "0.006")
 
     def test_instrcount_gate_identical_outside_counts_missing_counts_and_integer_precision(self):
         target = 18446744073709551614

@@ -274,6 +274,33 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(view.visible[0]["percent"], "+25.00%")
         self.assertFalse(self.errors)
 
+    def test_ipc_weight_column_numeric_sort_and_heading_arrows(self):
+        for side, benchmark, checkpoint, weight in (("current", "gcc", "180", "0.005394"),
+                                                    ("current", "perl", "10015", "0.9"),
+                                                    ("baseline", "perl", "10015", "0.1")):
+            directory = self.path / side / benchmark / checkpoint
+            (directory / f"_{checkpoint}_0.153974.log").rename(directory / f"_{checkpoint}_{weight}.log")
+        self.load_directory("current")
+        self.load_directory("baseline", True)
+        view = self.app.open_ipc_overview()
+        self.wait(lambda: not view.loading)
+        self.assertIn("weight", view.columns)
+        view.sort_by("weight")
+        self.assertEqual(view.visible[0]["weight"], "0.005394")
+        self.assertEqual(view.table.heading("weight", "text"), "权重 ▲")
+        view.sort_by("weight")
+        self.assertEqual(view.visible[0]["weight"], "0.9")
+        self.assertEqual(view.table.heading("weight", "text"), "权重 ▼")
+        self.assertIn("权重不同", view.visible[0]["note"])
+        view.query.set("10015")
+        self.assertEqual(view.table.heading("weight", "text"), "权重 ▼")
+        view.sort_by("percent")
+        self.assertEqual(view.table.heading("weight", "text"), "权重")
+        self.assertEqual(view.table.heading("percent", "text"), "变化百分比 ▲")
+        view.sort_by("percent")
+        self.assertEqual(view.table.heading("percent", "text"), "变化百分比 ▼")
+        self.assertFalse(self.errors)
+
 
 if __name__ == "__main__":
     unittest.main()

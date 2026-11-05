@@ -188,6 +188,15 @@ def load_checkpoint(current_perf, baseline_perf, current_log, baseline_log, comp
         raise
 
 
+def log_weight(path, checkpoint):
+    if path is None:
+        return "—"
+    match = re.fullmatch(r"_?(\d+)_([0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\.log", Path(path).name, re.I)
+    if not match or match.group(1) != checkpoint:
+        return "—"
+    return match.group(2) if 0 <= Decimal(match.group(2)) <= 1 else "—"
+
+
 def compare_run_ipc(current, baseline, encoding="utf-8"):
     """Read all main logs; retain unmatched files and failed reads as visible rows."""
     rows = []
@@ -201,6 +210,8 @@ def compare_run_ipc(current, baseline, encoding="utf-8"):
             c_names, b_names = {p.name: p for p in c_logs}, {p.name: p for p in b_logs}
             pairs = [(name, c_names.get(name), b_names.get(name)) for name in sorted(c_names.keys() | b_names.keys())]
         for name, c_path, b_path in pairs:
+            c_weight, b_weight = log_weight(c_path, checkpoint), log_weight(b_path, checkpoint)
+            weight = c_weight if c_weight != "—" else b_weight
             data, errors = {}, {}
             for side, path in (("current", c_path), ("baseline", b_path)):
                 try:
@@ -230,7 +241,10 @@ def compare_run_ipc(current, baseline, encoding="utf-8"):
                     notes.append("两边 instrcount 不同")
                 if len(c_logs) > 1 or len(b_logs) > 1:
                     notes.append("多份日志按文件名配对")
+                if c_weight != "—" and b_weight != "—" and Decimal(c_weight) != Decimal(b_weight):
+                    notes.append(f"权重不同（基准 {b_weight}，当前 {c_weight}）；权重列采用当前值")
                 rows.append({"benchmark": benchmark, "checkpoint": checkpoint, "log": name, "core": core or "（未标注）",
+                             "weight": weight, "baseline_weight": b_weight, "current_weight": c_weight,
                              "baseline_value": b.value if b else "—", "value": c.value if c else "—",
                              "delta": delta, "percent": percent, "direction": direction, "note": "；".join(notes),
                              "current_log": c_path, "baseline_log": b_path, "current": c, "baseline": b,
@@ -240,9 +254,9 @@ def compare_run_ipc(current, baseline, encoding="utf-8"):
 
 
 IPC_FIELDS = ("benchmark", "checkpoint", "log", "core", "baseline_value", "value", "delta", "percent", "direction", "note",
-              "baseline_log", "current_log")
+              "weight", "baseline_weight", "current_weight", "baseline_log", "current_log")
 IPC_HEADERS = ("子项", "checkpoint", "日志配对", "core", "基准 IPC", "当前 IPC", "差值", "变化百分比", "方向", "备注",
-               "基准主日志", "当前主日志")
+               "权重", "基准权重", "当前权重", "基准主日志", "当前主日志")
 
 
 def filter_ipc_instrcount(rows, target, tolerance):
