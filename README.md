@@ -104,10 +104,11 @@ python3 perf_viewer_gui.py /path/to/spec-result
 左侧自动切到“仿真状态”页签，按子项、checkpoint 和主日志逐条列出结果，同时标注来源是当前还是基准目录：
 
 - **绿色 PASS**：日志中包含字面关键字 `INSTR LIMIT`，例如 `EXCEEDING CYCLE/INSTR LIMIT`。
-- **红色 FAIL**：整份日志没有 `INSTR LIMIT`，但包含字面关键字 `IPC`。
-- **黑色 未判定**：两个关键字都没有，或主日志缺失、无法读取；具体原因保留在列表中。
+- **红色 FAIL**：整份日志没有 `INSTR LIMIT`，但包含 `IPC`，或出现 `Assertion failed`、`Verilog $stop`、`Aborting...` 任一异常退出标记。assert 导致仿真直接退出、没有 IPC 的日志也会判 FAIL。
+- **黑色 未判定**：没有上述任何关键字，或主日志缺失、无法读取；具体原因保留在列表中。
 
-关键字大小写精确匹配，忽略 ANSI 颜色控制码。`INSTR LIMIT` 优先，即使日志同时含有 `IPC` 也判 PASS。
+关键字大小写精确匹配，忽略 ANSI 颜色控制码。`INSTR LIMIT` 优先，即使日志同时含有 `IPC` 或异常退出标记也判 PASS。
+没有 `INSTR LIMIT` 时，异常退出标记优先作为 FAIL 的判断依据，双击可定位到 assert 或退出信息所在行。
 同一 checkpoint 有多份主日志时分别判断，不推断多次运行之间的关系，也不把缺失或运行中的日志当成 FAIL。
 该状态完全按上述关键字规则产生，不额外分析退出码、BAD TRAP 或其他错误信息。
 

@@ -57,6 +57,7 @@ def paired_keys(current=None, baseline=None):
 def check_simulation_log(path, encoding="utf-8"):
     """Use the user's literal keywords, with INSTR LIMIT taking precedence."""
     ipc = None
+    failure = None
     try:
         with Path(path).open(encoding=encoding, errors="replace") as stream:
             for number, raw in enumerate(stream, 1):
@@ -65,11 +66,19 @@ def check_simulation_log(path, encoding="utf-8"):
                     return {"result": "PASS", "reason": "包含 INSTR LIMIT", "line": number, "raw": raw.rstrip("\r\n")}
                 if ipc is None and "IPC" in clean:
                     ipc = number, raw.rstrip("\r\n")
+                if failure is None:
+                    for marker in ("Assertion failed", "Verilog $stop", "Aborting..."):
+                        if marker in clean:
+                            failure = number, raw.rstrip("\r\n"), marker
+                            break
     except OSError as error:
         return {"result": "未判定", "reason": "读取失败：" + str(error), "line": 0, "raw": ""}
+    if failure:
+        return {"result": "FAIL", "reason": f"仿真异常退出：包含 {failure[2]}，但没有 INSTR LIMIT",
+                "line": failure[0], "raw": failure[1]}
     if ipc:
         return {"result": "FAIL", "reason": "包含 IPC，但没有 INSTR LIMIT", "line": ipc[0], "raw": ipc[1]}
-    return {"result": "未判定", "reason": "没有 INSTR LIMIT 或 IPC", "line": 0, "raw": ""}
+    return {"result": "未判定", "reason": "没有 INSTR LIMIT、IPC 或异常退出标记", "line": 0, "raw": ""}
 
 
 def check_run_status(run, encoding="utf-8"):

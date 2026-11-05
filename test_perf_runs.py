@@ -104,6 +104,31 @@ class RunDirectoryTests(unittest.TestCase):
         self.assertIsNone(rows[1]["path"])
         self.assertTrue(all(row["path"] is None or row["path"].name.startswith("_") for row in rows))
 
+    def test_assert_abort_without_ipc_is_fail_and_preserves_evidence(self):
+        contents = ('checkpoint restore!\n'
+                    '[7869467] %Error: L2TLB.sv:418: Assertion failed in TOP.core.mmu.l2TLB: '
+                    'L2TLB miss request to PTW has been stall for 1024 cycle\n'
+                    '  at l2tlb.scala:124 assert(!reqToPTWStallCounter.andR)\n'
+                    '%Error: generated/core/L2TLB.sv:418: Verilog $stop\nAborting...\n')
+        path = self.checkpoint("current", "omnetpp", "261", {"_261_0.001264.log": contents}) / "_261_0.001264.log"
+        checked = check_simulation_log(path)
+        self.assertEqual((checked["result"], checked["line"]), ("FAIL", 2))
+        self.assertIn("Assertion failed", checked["reason"])
+        self.assertIn("1024 cycle", checked["raw"])
+        self.assertEqual(check_run_status(RunDirectory.scan(self.root / "current"))[0]["result"], "FAIL")
+
+    def test_abort_markers_ansi_and_existing_limit_precedence(self):
+        path = self.root / "_test.log"
+        for marker in ("Assertion failed", "Verilog $stop", "Aborting..."):
+            path.write_text(f"IPC=1\n\x1b[31m{marker}\x1b[0m\n")
+            checked = check_simulation_log(path)
+            self.assertEqual((checked["result"], checked["line"]), ("FAIL", 2))
+            self.assertIn(marker, checked["reason"])
+            path.write_text(f"{marker}\nEXCEEDING CYCLE/INSTR LIMIT\n")
+            self.assertEqual(check_simulation_log(path)["result"], "PASS")
+        path.write_text("assert checks enabled\nNo errors found\n")
+        self.assertEqual(check_simulation_log(path)["result"], "未判定")
+
     def test_status_missing_and_unreadable_log_are_not_fail(self):
         directory = self.checkpoint("current", "perl", "1", {"_1.log": "IPC=1"})
         with patch.object(Path, "open", side_effect=PermissionError("denied")):
