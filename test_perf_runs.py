@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from perf_runs import (RunDirectory, load_checkpoint, paired_keys, read_summary, summary_rows,
-                       compare_run_ipc, export_ipc_comparison, check_simulation_log, check_run_status)
+                       compare_run_ipc, export_ipc_comparison, check_simulation_log, check_run_status,
+                       filter_ipc_instrcount)
 
 
 class RunDirectoryTests(unittest.TestCase):
@@ -191,6 +192,36 @@ class RunDirectoryTests(unittest.TestCase):
         self.assertEqual(row["percent"], "+50.00%")
         self.assertIn("由 instrcount/cycle 计算", row["note"])
         self.assertIn("instrcount 不同", row["note"])
+
+    def test_instrcount_gate_inclusive_bounds_and_no_raw_row_mutation(self):
+        self.checkpoint("current", "gcc", "1", {"main.log": "instrCnt=105, cycleCnt=10, IPC=3"})
+        self.checkpoint("baseline", "gcc", "1", {"main.log": "instrCnt=95, cycleCnt=10, IPC=2"})
+        original = self.compare()
+        accepted, lower, upper = filter_ipc_instrcount(original, "100", "5")
+        self.assertEqual((lower, upper), (95, 105))
+        self.assertEqual(accepted[0]["percent"], "+50.00%")
+        self.assertNotIn("instrcount", accepted[0]["note"])
+        rejected, _, _ = filter_ipc_instrcount(original, "100", "4")
+        self.assertEqual((rejected[0]["direction"], rejected[0]["delta"], rejected[0]["percent"]), ("无法比较", "—", "—"))
+        self.assertIn("instrcount不同", rejected[0]["note"])
+        self.assertIn("基准 95，当前 105", rejected[0]["note"])
+        self.assertEqual(original[0]["percent"], "+50.00%")
+        self.assertIn("两边 instrcount 不同", original[0]["note"])
+
+    def test_instrcount_gate_identical_outside_counts_missing_counts_and_integer_precision(self):
+        target = 18446744073709551614
+        self.checkpoint("current", "gcc", "1", {"main.log": f"instrCnt={target + 1}, IPC=3"})
+        self.checkpoint("baseline", "gcc", "1", {"main.log": f"instrCnt={target + 1}, IPC=2"})
+        rows = self.compare()
+        self.assertEqual(filter_ipc_instrcount(rows, f"{target:,}", "1")[0][0]["direction"], "上升")
+        self.assertEqual(filter_ipc_instrcount(rows, str(target), "0")[0][0]["direction"], "无法比较")
+        rows[0]["current_instr"] = None
+        rejected = filter_ipc_instrcount(rows, str(target), "10")[0][0]
+        self.assertIn("当前 缺失", rejected["note"])
+        self.assertEqual(rejected["direction"], "无法比较")
+        for a, b in (("", "1"), ("-1", "1"), ("100", "-1"), ("100", "1.5"), ("1,,00", "0")):
+            with self.assertRaises(ValueError):
+                filter_ipc_instrcount(rows, a, b)
 
     def test_ipc_csv_export_and_protect_all_source_files_and_hardlinks(self):
         source = self.checkpoint("current", "gcc", "1", {"main.log": "IPC=2"}) / "main.log"

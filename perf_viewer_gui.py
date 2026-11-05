@@ -18,7 +18,7 @@ except ImportError:
 from perf_viewer import ANSI, LogStore, export_to_file
 from perf_compare import ComparisonStore, decimal_value, export_comparison
 from perf_runs import (RunDirectory, paired_keys, load_checkpoint, compare_run_ipc,
-                       export_ipc_comparison, IPC_FIELDS, IPC_HEADERS, check_run_status)
+                       export_ipc_comparison, IPC_FIELDS, IPC_HEADERS, check_run_status, filter_ipc_instrcount)
 
 
 class PerfViewerApp:
@@ -1008,6 +1008,10 @@ class IPCOverview:
         self.direction = tk.StringVar(value="全部")
         self.status = tk.StringVar()
         self.counts = tk.StringVar()
+        self.instr_enabled = tk.BooleanVar(value=False)
+        self.instr_target = tk.StringVar(value="40000000")
+        self.instr_tolerance = tk.StringVar(value="1")
+        self.instr_hint = tk.StringVar()
         ttk.Label(self.window, text=f"当前：{self.current_root}\n基准：{self.baseline_root}", padding=12, wraplength=1350).grid(row=0, column=0, sticky="ew")
         filters = ttk.Frame(self.window, padding=(12, 0, 12, 10))
         filters.grid(row=1, column=0, sticky="ew")
@@ -1021,7 +1025,17 @@ class IPCOverview:
         self.refresh_button.grid(row=0, column=4)
         self.export_button = ttk.Button(filters, text="导出筛选结果 CSV…", command=self.export, state="disabled")
         self.export_button.grid(row=0, column=5, padx=(12, 0))
-        ttk.Label(filters, textvariable=self.counts).grid(row=1, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        instr_controls = ttk.Frame(filters, padding=(0, 8, 0, 0))
+        instr_controls.grid(row=1, column=0, columnspan=6, sticky="ew")
+        ttk.Checkbutton(instr_controls, text="开启 instrcount 筛选", variable=self.instr_enabled).pack(side="left", padx=(0, 12))
+        ttk.Label(instr_controls, text="目标值 A：").pack(side="left")
+        self.instr_target_entry = ttk.Entry(instr_controls, textvariable=self.instr_target, width=14, state="disabled")
+        self.instr_target_entry.pack(side="left", padx=(0, 12))
+        ttk.Label(instr_controls, text="误差值 B：").pack(side="left")
+        self.instr_tolerance_entry = ttk.Entry(instr_controls, textvariable=self.instr_tolerance, width=10, state="disabled")
+        self.instr_tolerance_entry.pack(side="left", padx=(0, 12))
+        ttk.Label(instr_controls, textvariable=self.instr_hint).pack(side="left")
+        ttk.Label(filters, textvariable=self.counts).grid(row=2, column=0, columnspan=6, sticky="w", pady=(10, 0))
         frame = ttk.Frame(self.window, padding=(12, 0))
         frame.grid(row=2, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
@@ -1053,6 +1067,8 @@ class IPCOverview:
         app.build_font_controls(fontbar)
         self.query.trace_add("write", lambda *_: self.render())
         self.direction.trace_add("write", lambda *_: self.render())
+        for variable in (self.instr_enabled, self.instr_target, self.instr_tolerance):
+            variable.trace_add("write", lambda *_: self.render())
         self.refresh()
 
     def refresh(self):
@@ -1083,9 +1099,26 @@ class IPCOverview:
     def render(self):
         if self.closed:
             return
+        enabled = self.instr_enabled.get()
+        for entry in (self.instr_target_entry, self.instr_tolerance_entry):
+            entry.configure(state="normal" if enabled else "disabled")
+        rows = self.rows
+        if enabled:
+            try:
+                rows, lower, upper = filter_ipc_instrcount(rows, self.instr_target.get(), self.instr_tolerance.get())
+            except ValueError as error:
+                self.instr_hint.set(str(error))
+                self.visible = []
+                self.table.delete(*self.table.get_children())
+                self.counts.set("instrcount 筛选参数无效，请修正 A / B 后查看对比结果。")
+                self.export_button.configure(state="disabled")
+                return
+            self.instr_hint.set(f"两边都须在 [{lower}, {upper}] 内（含边界）")
+        else:
+            self.instr_hint.set("关闭时按原规则比较 IPC")
         words = self.query.get().casefold().split()
         direction = self.direction.get()
-        self.visible = [row for row in self.rows if (direction == "全部" or row["direction"] == direction) and
+        self.visible = [row for row in rows if (direction == "全部" or row["direction"] == direction) and
                         all(word in " ".join(str(row[name]) for name in IPC_FIELDS).casefold() for word in words)]
         column = self.sort_column
         if column in ("baseline_value", "value", "delta", "percent"):
@@ -1097,7 +1130,7 @@ class IPCOverview:
         self.table.delete(*self.table.get_children())
         for index, row in enumerate(self.visible):
             self.table.insert("", "end", iid=str(index), values=[row[name] for name in self.columns], tags=(row["direction"],))
-        counts = {name: sum(row["direction"] == name for row in self.rows) for name in ("上升", "下降", "不变", "新增", "缺失", "无法比较")}
+        counts = {name: sum(row["direction"] == name for row in rows) for name in ("上升", "下降", "不变", "新增", "缺失", "无法比较")}
         self.counts.set(f"显示 {len(self.visible):,} / {len(self.rows):,} 条 IPC · " + " · ".join(f"{name} {count:,}" for name, count in counts.items()))
         self.export_button.configure(state="normal" if self.visible and not self.loading and not self.exporting else "disabled")
 

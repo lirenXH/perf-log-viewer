@@ -245,6 +245,29 @@ IPC_HEADERS = ("子项", "checkpoint", "日志配对", "core", "基准 IPC", "�
                "基准主日志", "当前主日志")
 
 
+def filter_ipc_instrcount(rows, target, tolerance):
+    """Gate IPC comparisons on both instruction counts; preserve raw input rows."""
+    numbers = []
+    for label, text in (("目标值 A", target), ("误差值 B", tolerance)):
+        text = str(text).strip()
+        if not re.fullmatch(r"(?:\d{1,3}(?:,\d{3})+|\d+)", text):
+            raise ValueError(label + "必须是非负整数，可使用千分位逗号")
+        numbers.append(int(text.replace(",", "")))
+    lower, upper = numbers[0] - numbers[1], numbers[0] + numbers[1]
+    result = []
+    for row in rows:
+        c, b = row.get("current_instr"), row.get("baseline_instr")
+        eligible = c is not None and b is not None and all(lower <= Decimal(item.value) <= upper for item in (c, b))
+        row = dict(row)
+        notes = [note for note in row["note"].split("；") if note and note != "两边 instrcount 不同"]
+        if not eligible:
+            row.update(delta="—", percent="—", direction="无法比较")
+            notes.append(f"instrcount不同（要求 [{lower}, {upper}]；基准 {b.value if b else '缺失'}，当前 {c.value if c else '缺失'}）")
+        row["note"] = "；".join(notes)
+        result.append(row)
+    return result, lower, upper
+
+
 def export_ipc_comparison(rows, destination, sources=()):
     rows = list(rows)
     target = Path(destination)

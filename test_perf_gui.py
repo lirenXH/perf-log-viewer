@@ -238,6 +238,42 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(view.closed)
         self.assertFalse(self.errors)
 
+    def test_ipc_instrcount_gate_switch_bounds_invalid_input_and_export(self):
+        current = self.path / "current" / "perl" / "10015" / "_10015_0.153974.log"
+        baseline = self.path / "baseline" / "perl" / "10015" / "_10015_0.153974.log"
+        current.write_text("Core 0: limit\ninstrCnt=40000001, cycleCnt=16000000, IPC=2.5\n")
+        baseline.write_text("Core 0: limit\ninstrCnt=39999999, cycleCnt=20000000, IPC=2\n")
+        self.load_directory("current")
+        self.load_directory("baseline", True)
+        view = self.app.open_ipc_overview()
+        self.wait(lambda: not view.loading)
+        view.query.set("10015")
+        self.assertEqual(view.visible[0]["percent"], "+25.00%")
+        view.instr_enabled.set(True)
+        self.assertEqual(view.visible[0]["percent"], "+25.00%")
+        self.assertNotIn("instrcount", view.visible[0]["note"])
+        view.instr_tolerance.set("0")
+        self.assertEqual(view.visible[0]["direction"], "无法比较")
+        self.assertIn("instrcount不同", view.visible[0]["note"])
+        destination = self.path / "gated.csv"
+        with patch("perf_viewer_gui.filedialog.asksaveasfilename", return_value=str(destination)):
+            view.export()
+        self.wait(lambda: destination.exists() and not view.exporting)
+        self.assertIn("instrcount不同", destination.read_text(encoding="utf-8-sig"))
+        view.direction.set("上升")
+        self.assertEqual(len(view.visible), 0)
+        view.instr_enabled.set(False)
+        self.assertEqual(view.visible[0]["percent"], "+25.00%")
+        view.direction.set("全部")
+        view.instr_enabled.set(True)
+        view.instr_tolerance.set("-1")
+        self.assertEqual(len(view.visible), 0)
+        self.assertIn("非负整数", view.instr_hint.get())
+        self.assertTrue(view.export_button.instate(["disabled"]))
+        view.instr_tolerance.set("1")
+        self.assertEqual(view.visible[0]["percent"], "+25.00%")
+        self.assertFalse(self.errors)
+
 
 if __name__ == "__main__":
     unittest.main()
